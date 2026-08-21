@@ -30,3 +30,5 @@ dist-ssr
 *.dylib
 __pycache__
 !pikafish-windows.exe
+!libs/large.onnx
+!libs/windows-cpu/*.dll
