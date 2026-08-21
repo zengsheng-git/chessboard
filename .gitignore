@@ -12,6 +12,7 @@ target/
 dist
 dist-ssr
 *.local
+.msi
 
 # Editor directories and files
 .vscode/*
