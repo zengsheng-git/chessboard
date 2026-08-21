@@ -18,6 +18,20 @@ pnpm tauri dev        # 第二次成功
 
 > dev 模式首次运行 panic 是因为 Tauri 把资源路径中的 `..` 映射为 `_up_` 目录，需要在 `target\debug\` 下建立 junction 指向 `libs`。正式打包不受影响。
 
+dev 模式启用 GPU 推理（覆盖 DLL 法）：
+
+```powershell
+# 一次性：把 GPU 版 DLL 复制到 target\debug\（覆盖 CPU 版同名文件）
+Copy-Item F:\w\template\chessboard\libs\windows-gpu\* F:\w\template\chessboard\server\target\debug\ -Force
+# 之后每次启动都用 --features gpu
+pnpm tauri dev --features gpu
+# 切回 CPU
+Copy-Item F:\w\template\chessboard\libs\windows-cpu\*.dll F:\w\template\chessboard\server\target\debug\ -Force
+pnpm tauri dev
+```
+
+> GPU 版需要在 Release 下载 windows-gpu.zip 放到 `libs/windows-gpu/`；`--features gpu` 首次会重新链接 ort，较慢。无 N 卡驱动时按注册顺序自动落到 DirectML 或 CPU。
+
 打包安装包：
 
 ```powershell
