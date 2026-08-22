@@ -46,9 +46,10 @@ pnpm build:gpu    # GPU 版（需要把官方 xqlink_0.1.2_x64-GPU.msi 解包后
 
 ## ⚠️ 注意事项
 
-- **CPU 与 GPU 版本互斥**：MSI 文件名完全相同，后打的会覆盖前者，打包后请立即按内容加 `-CPU` / `-GPU` 后缀（GPU 版约 350MB+，CPU 版约 40MB）。
+- **CPU 与 GPU 版本互斥**：MSI 文件名完全相同，后打的会覆盖前者，打包后请立即按内容加 `-CPU` / `-GPU` 后缀（GPU 版约 350MB+，CPU 版约 75MB）。
 - **GPU DLL 仓库不含**：从 [v0.1.2-gpu-dlls Release](https://github.com/zengsheng-git/chessboard/releases/tag/v0.1.2-gpu-dlls) 下载 `windows-gpu.zip`（196MB），解压到 `libs/windows-gpu/` 后才能 `pnpm build:gpu`（`onnxruntime_providers_cuda.dll` 320MB 超过 GitHub 单文件 100MB 限制）。
 - **dev 模式 `_up_` junction 与 DLL**：`cargo clean` 或删除 `target/` 后需要重新建立 junction 并重新复制 `libs\windows-cpu\*.dll` 到 `target\debug\`，否则引擎启动会 panic。
+- **交替打包 CPU/GPU 前先清理 `target\release\`**：`tauri build` 会把 `bundle.resources` 声明的 DLL 复制到 `server\target\release\`（exe 旁），打包时还会把该目录里**所有** DLL 扫进安装包。GPU 打包留下的 `onnxruntime_providers_cuda.dll`、`onnxruntime_providers_tensorrt.dll` 会让之后打出的 CPU 包也带上 300MB+ 的 CUDA 文件（表现为 CPU 包从 75MB 变成 266MB）。打 CPU 包前先删除 `server\target\release\onnxruntime*.dll`（打包过程会自动放入需要的）。
 - **WebView2 与沙箱**：WebView2 需正常访问 `AppData\Local\<identifier>\EBWebView\` 目录，在某些受限终端（如 sandbox）下 webview 会启动失败导致窗口白屏，需在普通终端运行。
 - **已安装冲突**：与官方版同 identifier `top.itmeng.xqlink`，同时只能装一个（`allowDowngrades: true` 允许升级/降级互盖）。
 - **rotate 模型未开源**：`libs/rotate.onnx` 不在公开仓库，也未随 MSI 发布，`build:cpu:rotate` 与 `build:gpu:rotate` 不可用。
