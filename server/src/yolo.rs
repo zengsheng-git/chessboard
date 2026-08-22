@@ -15,6 +15,7 @@ static SESSION: OnceLock<ort::session::Session> = OnceLock::new();
 
 pub const IMAGE_WIDTH: usize = 640;
 pub const IMAGE_HEIGHT: usize = 640;
+const INFERENCE_THREADS: usize = 4;
 const CONFIDENCE_THRESHOLD: f32 = 0.7;
 const IOU_THRESHOLD: f32 = 0.5;
 const LABELS: [char; 15] = ['n', 'b', 'a', 'k', 'r', 'c', 'p', 'R', 'N', 'A', 'K', 'B', 'C', 'P', '0'];
@@ -48,6 +49,8 @@ pub fn session() -> &'static ort::session::Session {
 
         ort::session::Session::builder().expect("init session failed with builder")
         .with_optimization_level(GraphOptimizationLevel::Level3).expect("init session failed with optimization level")
+        .with_intra_threads(INFERENCE_THREADS).expect("init session failed with intra threads")
+        .with_intra_op_spinning(false).expect("init session failed with spinning config")
         .commit_from_memory(MODEL_BYTES).expect("init session failed with load model")
     })
 }

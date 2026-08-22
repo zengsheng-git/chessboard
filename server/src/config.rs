@@ -29,7 +29,7 @@ impl Default for Config {
         Self {
             config_path: None,
             loglevel: "INFO".to_string(),
-            timer_interval: 100,
+            timer_interval: 200,
             confirm_interval: 200,
             engine: Default::default(),
         }
