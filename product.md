@@ -13,10 +13,13 @@ pnpm install
 pnpm tauri dev        # 首次会 panic 在引擎路径，没关系
 New-Item -ItemType Directory -Force server\target\debug\_up_ | Out-Null
 New-Item -ItemType Junction -Path server\target\debug\_up_\libs -Target libs
+Copy-Item libs\windows-cpu\*.dll server\target\debug\ -Force
 pnpm tauri dev        # 第二次成功
 ```
 
 > dev 模式首次运行 panic 是因为 Tauri 把资源路径中的 `..` 映射为 `_up_` 目录，需要在 `target\debug\` 下建立 junction 指向 `libs`。正式打包不受影响。
+>
+> 复制 CPU 版 DLL 是因为 ort 以 `load-dynamic` 方式按 exe 目录加载 `onnxruntime.dll`；dev 模式不会自动放置 DLL，若 exe 目录没有，Windows 会继续搜索 system32，可能命中其他软件遗留的旧版 DLL（如 1.10），导致 ort 版本校验 panic（要求 ≥1.20）。
 
 dev 模式启用 GPU 推理（覆盖 DLL 法）：
 
@@ -45,7 +48,7 @@ pnpm build:gpu    # GPU 版（需要把官方 xqlink_0.1.2_x64-GPU.msi 解包后
 
 - **CPU 与 GPU 版本互斥**：MSI 文件名完全相同，后打的会覆盖前者，打包后请立即按内容加 `-CPU` / `-GPU` 后缀（GPU 版约 350MB+，CPU 版约 40MB）。
 - **GPU DLL 仓库不含**：从 [v0.1.2-gpu-dlls Release](https://github.com/zengsheng-git/chessboard/releases/tag/v0.1.2-gpu-dlls) 下载 `windows-gpu.zip`（196MB），解压到 `libs/windows-gpu/` 后才能 `pnpm build:gpu`（`onnxruntime_providers_cuda.dll` 320MB 超过 GitHub 单文件 100MB 限制）。
-- **dev 模式 `_up_` junction**：`cargo clean` 或删除 `target/` 后需要重新建立，否则引擎启动会 panic。
+- **dev 模式 `_up_` junction 与 DLL**：`cargo clean` 或删除 `target/` 后需要重新建立 junction 并重新复制 `libs\windows-cpu\*.dll` 到 `target\debug\`，否则引擎启动会 panic。
 - **WebView2 与沙箱**：WebView2 需正常访问 `AppData\Local\<identifier>\EBWebView\` 目录，在某些受限终端（如 sandbox）下 webview 会启动失败导致窗口白屏，需在普通终端运行。
 - **已安装冲突**：与官方版同 identifier `top.itmeng.xqlink`，同时只能装一个（`allowDowngrades: true` 允许升级/降级互盖）。
 - **rotate 模型未开源**：`libs/rotate.onnx` 不在公开仓库，也未随 MSI 发布，`build:cpu:rotate` 与 `build:gpu:rotate` 不可用。
