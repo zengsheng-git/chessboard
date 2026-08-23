@@ -18,7 +18,8 @@ const logs = ref<string[]>([])
 const best = ref({
     move: "----",
     depth: 0,
-    score: 0,
+    evalText: "--",
+    evalType: "info" as "error" | "success" | "info",
 })
 
 listen('analyse', async (event) => {
@@ -35,7 +36,9 @@ listen('analyse', async (event) => {
     }
     best.value.move = data.moves[0];
     best.value.depth = data.depth;
-    best.value.score = data.score;
+    const evalResult = formatEval(data.score);
+    best.value.evalText = evalResult.text;
+    best.value.evalType = evalResult.type;
 
     // 设置b-select
     let pv = data.pvs[0];
@@ -48,6 +51,19 @@ listen('analyse', async (event) => {
 
 const logInstRef = ref<LogInst | null>(null)
 
+// 分数解读：正分=我方(行棋方)优势；杀棋编码正分一致(30000-N)，负分不同：本地引擎 -(30000+N)、云库 -(30000-N)
+function formatEval(score: number): { text: string, type: "error" | "success" | "info" } {
+    if (score >= 29000) return { text: `${30000 - score}步杀`, type: "error" };
+    if (score <= -30001) return { text: `${-score - 30000}步被杀`, type: "error" };
+    if (score <= -29000) return { text: `${30000 + score}步被杀`, type: "error" };
+    const abs = Math.abs(score);
+    if (abs < 30) return { text: "均势", type: "info" };
+    const grade = abs < 150 ? "略优" : abs < 400 ? "较优" : abs < 800 ? "大优" : "胜势";
+    return score > 0
+        ? { text: `我方${grade} +${score}`, type: "error" }
+        : { text: `对方${grade} ${score}`, type: "success" };
+}
+
 </script>
 
 <template>
@@ -57,11 +73,11 @@ const logInstRef = ref<LogInst | null>(null)
                 {{ best.move }}
             </n-text>
 
-            <n-text type="error">
-                {{ best.score }}
+            <n-text :type="best.evalType">
+                {{ best.evalText }}
             </n-text>
             <n-text type="warning">
-                {{ best.depth }}
+                深度 {{ best.depth }}
             </n-text>
         </n-flex>
         <n-divider />
