@@ -45,9 +45,11 @@ interface EngineConfig {
     time: number;
     threads: number;
     hash: number;
+    multipv: number;
     // show_wdl: number;
     chessdb_enabled: boolean;
     chessdb_timeout: number;
+    alt_score_gap: number;
 }
 
 const mode = ref(options[0].value);
@@ -57,8 +59,10 @@ const config = ref<EngineConfig>({
     time: 0,
     threads: 0,
     hash: 0,
+    multipv: 0,
     chessdb_enabled: false,
     chessdb_timeout: 0,
+    alt_score_gap: 0,
 });
 
 const showEngineConfig = ref(false);
@@ -236,6 +240,14 @@ async function setEngineHash() {
     await invoke("set_engine_hash", { size: config.value.hash });
 }
 
+async function setEngineMultipv() {
+    await invoke("set_engine_multipv", { num: config.value.multipv });
+}
+
+async function setEngineAltScoreGap() {
+    await invoke("set_engine_alt_score_gap", { gap: config.value.alt_score_gap });
+}
+
 async function setChessdb() {
     await invoke("set_chessdb", {
         enabled: config.value.chessdb_enabled,
@@ -355,6 +367,27 @@ async function toggleEngine() {
                             :max="102400"
                             style="width: 120px"
                             @update:value="setEngineHash"
+                        />
+                    </n-form-item>
+                    <n-form-item label="候选招数">
+                        <n-input-number
+                            v-model:value="config.multipv"
+                            button-placement="both"
+                            :min="1"
+                            :max="5"
+                            style="width: 120px"
+                            @update:value="setEngineMultipv"
+                        />
+                    </n-form-item>
+                    <n-form-item label="次优分差">
+                        <n-input-number
+                            v-model:value="config.alt_score_gap"
+                            button-placement="both"
+                            :min="0"
+                            :max="1000"
+                            :step="10"
+                            style="width: 120px"
+                            @update:value="setEngineAltScoreGap"
                         />
                     </n-form-item>
                     <n-form-item label="启用云库">

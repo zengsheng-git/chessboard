@@ -59,6 +59,14 @@ impl Camp {
     }
 
     pub fn is_black(&self) -> bool { Camp::Black.eq(self) }
+
+    pub fn opposite(&self) -> Self {
+        match self {
+            Camp::Red => Camp::Black,
+            Camp::Black => Camp::Red,
+            Camp::None => Camp::None,
+        }
+    }
 }
 
 const BLACK_VERTICALS: [char; 9] = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];

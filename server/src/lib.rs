@@ -59,6 +59,8 @@ pub fn run() {
             config::set_engine_time,
             config::set_engine_threads,
             config::set_engine_hash,
+            config::set_engine_multipv,
+            config::set_engine_alt_score_gap,
             config::set_chessdb,
         ])
         .run(tauri::generate_context!())

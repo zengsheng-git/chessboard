@@ -126,6 +126,24 @@ pub async fn set_engine_hash(size: usize) {
 }
 
 #[tauri::command]
+pub async fn set_engine_multipv(num: usize) {
+    let state = SHARED_STATE.get().unwrap();
+    let mut config = state.config.write().unwrap();
+    config.engine.multipv = num;
+    config.save();
+    debug!("set_engine_multipv: {}", num);
+}
+
+#[tauri::command]
+pub async fn set_engine_alt_score_gap(gap: isize) {
+    let state = SHARED_STATE.get().unwrap();
+    let mut config = state.config.write().unwrap();
+    config.engine.alt_score_gap = gap;
+    config.save();
+    debug!("set_engine_alt_score_gap: {}", gap);
+}
+
+#[tauri::command]
 pub async fn set_chessdb(enabled: bool, timeout: Option<u64>) {
     let state = SHARED_STATE.get().unwrap();
     let mut config = state.config.write().unwrap();

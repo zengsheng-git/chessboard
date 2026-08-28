@@ -62,8 +62,8 @@ async function setPiecesOnBoard(pieces: Position[]) {
         let ele = document.getElementById(record.pos)?.firstElementChild;
 
         // 移除 select
-        document.querySelectorAll(".b-select").forEach(element => {
-            element.classList.remove("b-select")
+        document.querySelectorAll(".b-select, .r-select, .alt-select").forEach(element => {
+            element.classList.remove("b-select", "r-select", "alt-select")
         });
 
         // 移除坐标原棋子
@@ -108,8 +108,8 @@ listen('move', async (event) => {
     let token = `piece-${change.piece}`;
 
     // 移除 select
-    document.querySelectorAll(".b-select").forEach(element => {
-        element.classList.remove("b-select")
+    document.querySelectorAll(".b-select, .r-select, .alt-select").forEach(element => {
+        element.classList.remove("b-select", "r-select", "alt-select")
     });
 
     // 原坐标移除棋子

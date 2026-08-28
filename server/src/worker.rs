@@ -94,7 +94,7 @@ impl AnalysisContext {
         let result = block_on(engine.search(&fen, &config.engine));
         result.as_ref()?;
 
-        let (expect_move, expect_board) = analyse(&self.app, result.unwrap(), board);
+        let (expect_move, expect_board) = analyse(&self.app, result.unwrap(), board, camp);
         Some(BoardAnalysisResult { expect_move, expect_board })
     }
 
@@ -107,6 +107,26 @@ impl AnalysisContext {
 
     // 处理移动事件
     fn handle_move(&mut self, changed: &chess::Changed) { self.app.emit("move", changed).unwrap(); }
+
+    // 分析指定行棋方并更新预期，返回新状态
+    fn analyze_and_set_state(&mut self, turn: chess::Camp, board: [[char; 9]; 10], camp: &chess::Camp) -> ChessboardState {
+        if let Some(result) = self.analyze_board(&turn, board) {
+            self.expect_move = result.expect_move;
+            self.expect_board = result.expect_board;
+        }
+        if turn.eq(camp) {
+            ChessboardState::OurTurn
+        } else {
+            ChessboardState::OpponentTurn
+        }
+    }
+
+    // 处理一次走棋：更新UI、分析下一行动方并返回新状态
+    fn handle_move_and_next(&mut self, changed: &chess::Changed, board: [[char; 9]; 10], camp: &chess::Camp) -> ChessboardState {
+        self.last_board = board;
+        self.handle_move(changed);
+        self.analyze_and_set_state(changed.camp.opposite(), board, camp)
+    }
 
     // 处理错误变化计数
     fn handle_invalid_change(
@@ -138,7 +158,7 @@ pub fn get_board(image: ImageBuffer<Rgba<u8>, Vec<u8>>) -> Option<(chess::Camp, 
     }
 }
 
-pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10]) -> (chess::Changed, [[char; 9]; 10]) {
+pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10], camp: &chess::Camp) -> (chess::Changed, [[char; 9]; 10]) {
     // 引擎结果翻译为中文
     let best_pv = result.pvs.first().unwrap();
     let best_move = chess::board_move_chinese(board, best_pv);
@@ -152,6 +172,12 @@ pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10])
         result.moves.push(mv);
         tmp_board = chess::board_move(tmp_board, pv);
     }
+    // 次优候选首着（与最优并列，均从当前局面出发）
+    for alt in result.alternatives.clone() {
+        result.alt_moves.push(chess::board_move_chinese(board, &alt));
+    }
+    // 标记本次分析的行棋方阵营
+    result.camp = camp.to_char();
     // 把结果发送给前端
     info!("分析结果 {:?}", result);
     app.emit("analyse", result).unwrap();
@@ -193,8 +219,17 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                 // 设置前端棋盘
                 context.update_ui(&camp, board);
 
-                // 分析当前棋盘
-                if let Some(result) = context.analyze_board(&camp, board) {
+                // 确定初始局面轮到谁：初始棋盘红方先手，否则按玩家阵营近似
+                let turn = if chess::startpos(board) {
+                    chess::Camp::Red
+                } else if camp.eq(&chess::Camp::Red) {
+                    chess::Camp::Red
+                } else {
+                    chess::Camp::Black
+                };
+
+                // 分析当前行棋方
+                if let Some(result) = context.analyze_board(&turn, board) {
                     context.expect_move = result.expect_move;
                     context.expect_board = result.expect_board;
                 }
@@ -204,7 +239,7 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                 // 如果是初始棋盘，进入初始状态，否则进入一般状态
                 if chess::startpos(board) {
                     ChessboardState::StartPos
-                } else if camp.eq(&chess::Camp::Red) {
+                } else if turn.eq(&camp) {
                     ChessboardState::OurTurn
                 } else {
                     ChessboardState::OpponentTurn
@@ -223,20 +258,7 @@ fn process_analysis_loop(mut context: AnalysisContext) {
 
                         match board_state {
                             chess::BoardChangeState::Move => {
-                                context.last_board = board;
-                                context.handle_move(&changed);
-
-                                if camp.eq(&changed.camp) {
-                                    // 我方移动
-                                    ChessboardState::OurTurn
-                                } else {
-                                    // 对方移动，需要分析
-                                    if let Some(result) = context.analyze_board(&camp, board) {
-                                        context.expect_move = result.expect_move;
-                                        context.expect_board = result.expect_board;
-                                    }
-                                    ChessboardState::OpponentTurn
-                                }
+                                context.handle_move_and_next(&changed, board, &camp)
                             }
                             chess::BoardChangeState::One => {
                                 context.handle_invalid_change(context.last_board, board, &camp)
@@ -282,19 +304,13 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                     debug!("棋盘未发生变化，跳过分析");
                     current_state // 保持当前状态
                 } else if board == context.expect_board {
-                    // 符合预期棋盘，跳过分析
-                    debug!("棋盘为预期棋盘，跳过分析");
+                    // 符合预期棋盘，分析下一行动方
+                    debug!("棋盘为预期棋盘，分析下一行动方");
                     let expect_move = context.expect_move.clone();
                     let expect_board = context.expect_board;
                     context.last_board = expect_board;
                     context.handle_move(&expect_move);
-
-                    // 更换下一个行动方
-                    if current_state == ChessboardState::OurTurn {
-                        ChessboardState::OpponentTurn
-                    } else {
-                        ChessboardState::OurTurn
-                    }
+                    context.analyze_and_set_state(expect_move.camp.opposite(), expect_board, &camp)
                 } else {
                     // 确认棋盘变化是否稳定
                     if !context.confirm_board(board) {
@@ -313,22 +329,7 @@ fn process_analysis_loop(mut context: AnalysisContext) {
 
                         match board_state {
                             chess::BoardChangeState::Move => {
-                                context.last_board = board;
-                                context.handle_move(&changed);
-
-                                if camp.eq(&changed.camp) {
-                                    // 我方移动，跳过分析
-                                    debug!("我方移动, {} -> {}, 跳过分析", changed.from, changed.to);
-                                    ChessboardState::OurTurn
-                                } else {
-                                    // 对方移动，需要分析
-                                    debug!("对方移动, {} -> {}, 需要分析", changed.from, changed.to);
-                                    if let Some(result) = context.analyze_board(&camp, board) {
-                                        context.expect_move = result.expect_move;
-                                        context.expect_board = result.expect_board;
-                                    }
-                                    ChessboardState::OpponentTurn
-                                }
+                                context.handle_move_and_next(&changed, board, &camp)
                             }
                             chess::BoardChangeState::One => {
                                 context.handle_invalid_change(context.last_board, board, &camp)
