@@ -8,11 +8,14 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 use xcap::image::ImageBuffer;
 use xcap::image::Rgba;
 
+use crate::attack;
 use crate::chess;
 use crate::common;
+use crate::engine::DeviationCost;
 use crate::engine::QueryResult;
 use crate::listen::ListenWindow;
 use crate::listen::Window;
@@ -44,6 +47,9 @@ struct AnalysisContext {
     last_board: [[char; 9]; 10],
     expect_move: chess::Changed,
     expect_board: [[char; 9]; 10],
+    expect_score: isize,                    // 上次分析的评分(行棋方视角)
+    expect_camp: chess::Camp,               // 上次分析的行棋方
+    pending_deviation: Option<chess::Camp>, // 刚发生非预期走子的一方, 下次分析时计算代价
     invalid_change_count: usize,
 }
 
@@ -59,6 +65,9 @@ impl AnalysisContext {
             last_board: [[' '; 9]; 10],
             expect_move: chess::Changed::default(),
             expect_board: [[' '; 9]; 10],
+            expect_score: 0,
+            expect_camp: chess::Camp::None,
+            pending_deviation: None,
             invalid_change_count: 0,
         }
     }
@@ -69,16 +78,10 @@ impl AnalysisContext {
         state.listen_thread.lock().unwrap().is_none()
     }
 
-    // 获取棋盘图像并分析
-    fn capture_and_analyze_board(&self) -> Option<(chess::Camp, [[char; 9]; 10])> {
-        let image = self.window.capture();
-        get_board(image)
-    }
-
     // 确认棋盘状态是否稳定
     fn confirm_board(&self, board: [[char; 9]; 10]) -> bool {
         thread::sleep(Duration::from_millis(100));
-        let conf_image = self.window.capture();
+        let Some(conf_image) = self.window.capture() else { return false };
         if let Some((_, conf_board)) = get_board(conf_image) {
             return conf_board == board;
         }
@@ -94,7 +97,17 @@ impl AnalysisContext {
         let result = block_on(engine.search(&fen, &config.engine));
         result.as_ref()?;
 
-        let (expect_move, expect_board) = analyse(&self.app, result.unwrap(), board, camp);
+        // 上一步为非预期走子时, 携带当时的预期评分用于计算偏离代价
+        let prev = self.pending_deviation.take().and_then(|dev_camp| {
+            if self.expect_camp == dev_camp { Some((dev_camp, self.expect_score)) } else { None }
+        });
+
+        let result = result.unwrap();
+        let score = result.score;
+        let (expect_move, expect_board) = analyse(&self.app, result, board, camp, prev)?;
+        // 记录本次预期评分与行棋方, 供下一步偏离对比
+        self.expect_score = score;
+        self.expect_camp = camp.clone();
         Some(BoardAnalysisResult { expect_move, expect_board })
     }
 
@@ -125,6 +138,8 @@ impl AnalysisContext {
     fn handle_move_and_next(&mut self, changed: &chess::Changed, board: [[char; 9]; 10], camp: &chess::Camp) -> ChessboardState {
         self.last_board = board;
         self.handle_move(changed);
+        // 本步为非预期走子(与引擎预测不符), 下次分析时计算偏离代价
+        self.pending_deviation = Some(changed.camp.clone());
         self.analyze_and_set_state(changed.camp.opposite(), board, camp)
     }
 
@@ -158,16 +173,28 @@ pub fn get_board(image: ImageBuffer<Rgba<u8>, Vec<u8>>) -> Option<(chess::Camp, 
     }
 }
 
-pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10], camp: &chess::Camp) -> (chess::Changed, [[char; 9]; 10]) {
-    // 引擎结果翻译为中文
-    let best_pv = result.pvs.first().unwrap();
+pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10], camp: &chess::Camp, prev: Option<(chess::Camp, isize)>) -> Option<(chess::Changed, [[char; 9]; 10])> {
+    // 云库/引擎可能返回成功状态但缺少着法, 跳过本次展示, 避免监听线程 panic
+    let Some(best_pv) = result.pvs.first() else {
+        warn!("分析结果缺少着法, 跳过展示: {:?}", result.state);
+        return None;
+    };
+
+    // 上一步为非预期走子时, 计算相对预期的亏损(前后评分均为行棋方视角)
+    if let Some((dev_camp, prev_score)) = prev
+        && dev_camp == camp.opposite()
+    {
+        result.deviation = Some(DeviationCost { camp: dev_camp.to_char(), loss: prev_score + result.score });
+    }
     let best_move = chess::board_move_chinese(board, best_pv);
     let expect_board = chess::board_move(board, best_pv);
     let expect_move = chess::Changed::from_pv(best_pv, board);
+    // 标注最优招法意图(吃子/将军/威胁等), 仅供界面展示, 不参与选招
+    result.notes = attack::explain_move(&board, camp, best_pv);
 
     let mut tmp_board = expect_board;
     result.moves.push(best_move);
-    for pv in result.pvs.iter().skip(1).take(3) {
+    for pv in result.pvs.iter().skip(1) {
         let mv = chess::board_move_chinese(tmp_board, pv);
         result.moves.push(mv);
         tmp_board = chess::board_move(tmp_board, pv);
@@ -183,12 +210,13 @@ pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10],
     app.emit("analyse", result).unwrap();
 
     // 返回一个预期move和预期board
-    (expect_move, expect_board)
+    Some((expect_move, expect_board))
 }
 
 // 处理循环逻辑的主函数
 fn process_analysis_loop(mut context: AnalysisContext) {
     let mut current_state = ChessboardState::Initial;
+    let mut capture_failures = 0usize;
 
     loop {
         // 检查是否需要停止监听
@@ -201,8 +229,20 @@ fn process_analysis_loop(mut context: AnalysisContext) {
         let interval = SHARED_STATE.get().unwrap().config.read().unwrap().timer_interval;
         thread::sleep(Duration::from_millis(interval));
 
+        // 截图失败多为目标窗口已关闭, 连续失败达到上限则通知前端并结束监听
+        let Some(image) = context.window.capture() else {
+            capture_failures += 1;
+            if capture_failures >= 3 {
+                error!("目标窗口连续截图失败, 可能已关闭, 停止监听");
+                let _ = context.app.emit("listen_stopped", "目标窗口可能已关闭, 监听已停止");
+                break;
+            }
+            continue;
+        };
+        capture_failures = 0;
+
         // 捕获并分析棋盘
-        let board_result = context.capture_and_analyze_board();
+        let board_result = get_board(image);
         if board_result.is_none() {
             continue;
         }
@@ -363,8 +403,12 @@ pub async fn start_listen(app: AppHandle, target: Window) -> Result<(), String> 
     }
 
     // 初始化监听窗口模块
-    let mut window = ListenWindow::new(&target, IMAGE_WIDTH, IMAGE_HEIGHT).unwrap(); // 创建窗口实例
-    let image = window.capture();
+    let Some(mut window) = ListenWindow::new(&target, IMAGE_WIDTH, IMAGE_HEIGHT) else {
+        return Err("目标窗口不存在".to_string());
+    };
+    let Some(image) = window.capture() else {
+        return Err("无法截取目标窗口画面".to_string());
+    };
 
     let image_h = image.height();
     let image_w = image.width();

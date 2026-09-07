@@ -57,12 +57,14 @@ impl ListenWindow {
         None
     }
 
-    pub fn capture(&self) -> image::ImageBuffer<image::Rgba<u8>, Vec<u8>> {
-        let mut pic = self.window.capture_image().unwrap();
+    // 截图目标窗口; 窗口已关闭等异常时返回 None
+    pub fn capture(&self) -> Option<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
+        let mut pic = self.window.capture_image().ok()?;
         if self.w > 0 {
-            pic = pic.sub_image(self.x, self.y, self.w, self.h).to_image();
+            Some(pic.sub_image(self.x, self.y, self.w, self.h).to_image())
+        } else {
+            Some(pic)
         }
-        pic
     }
 
     pub fn set_sub_bound(&mut self, x: u32, y: u32, w: u32, h: u32) {

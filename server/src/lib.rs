@@ -7,6 +7,7 @@ use std::thread;
 use engine::Engine;
 use tauri::Manager as _;
 
+mod attack;
 mod chess;
 mod common;
 mod config;
@@ -59,6 +60,7 @@ pub fn run() {
             config::set_engine_time,
             config::set_engine_threads,
             config::set_engine_hash,
+            config::set_engine_show_wdl,
             config::set_engine_multipv,
             config::set_engine_alt_score_gap,
             config::set_chessdb,

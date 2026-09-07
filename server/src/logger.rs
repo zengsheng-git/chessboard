@@ -60,6 +60,6 @@ pub fn init_tracer(level: Level, home_dir: &std::path::Path) {
         .with_writer(non_blocking_file)
         .compact();
 
-    // 组装并设置订阅者
-    registry().with(filter).with(console_layer).with(file_layer).init();
+    // 组装并设置订阅者; 多个测试并发初始化时忽略重复设置
+    let _ = registry().with(filter).with(console_layer).with(file_layer).try_init();
 }

@@ -5,15 +5,16 @@
 - [ ] **帧差跳帧**：棋盘画面无变化时跳过截图后的 YOLO 推理（先做廉价像素 diff），预计监听基础 CPU 再降 50% 以上，且不损失反应速度
 - [ ] **线程/哈希设置立即生效**：`config.rs` 的 `set_engine_threads`/`set_engine_hash` 直接调用 `engine.set_threads/set_hash`（或前端接入现成的 `reload_engine` 命令），改完删除 product.md 中"需重启应用"的说明
 - [ ] **打包防污染**：`build:cpu`/`build:gpu` 前自动清理 `server\target\release\onnxruntime*.dll`，打包完成后自动给 MSI 加 `-CPU`/`-GPU` 后缀
-- [ ] **监听健壮性**：目标窗口被关闭时截图 `unwrap` 会 panic（`listen.rs`），需加窗口存活检查；识别连续失败时前端给状态提示，避免"看起来卡死"
-- [ ] **配置项补全**：`timer_interval`/`confirm_interval` 增加前端设置入口；接通 `show_wdl`（`EngineConfig` 有字段、引擎有 setoption，但缺 tauri 命令和 UI）
+- [x] **监听健壮性**：截图改为可失败（`listen.rs` capture 返回 Option），目标窗口关闭时连续 3 次截图失败自动结束监听并发 `listen_stopped` 事件，前端弹窗提示并复位按钮状态
+- [ ] **配置项补全**：`timer_interval`/`confirm_interval` 增加前端设置入口
+- [x] **接通 `show_wdl`**：引擎 info 解析 wdl 千分比胜率随 `analyse` 事件下发；设置抽屉新增"胜率显示"开关，改完立即生效（`set_engine_show_wdl` 直接下发 setoption，无需重启）
 
 ## 中优先级（体验提升）
 
 - [ ] **对局记录与复盘**：逐步保存 FEN + 引擎评分，对局结束后可复盘"哪步走亏了多少分"、导出棋谱
-- [ ] **胜率曲线**：依赖 `show_wdl` 打通，前端绘制局面胜率随步数变化的曲线
-- [ ] **建议来源标注**：UI 显示 `QueryResult.source`（云库/引擎）与 `depth`，让用户知道每招的分量
-- [ ] **对手缓招提醒**：偏离预期棋盘（`expect_board` 机制已有雏形）时提示亏损分数，比单纯给招法更接近"学习"
+- [ ] **胜率曲线**：`show_wdl` 已打通（千分比胜率已随 `analyse` 事件下发），前端绘制局面胜率随步数变化的曲线
+- [x] **建议来源标注**：UI 显示 `QueryResult.source`（云库/引擎）与 `depth`，让用户知道每招的分量
+- [x] **对手缓招提醒**：非预期走子（与 `expect_board` 不符）后，用下次分析的评分与上次预期评分计算亏损，`QueryResult.deviation` 随 `analyse` 事件下发，面板显示"我方/对方偏离提示 亏 N 分"
 
 ## 低优先级（大功能/工程化）
 

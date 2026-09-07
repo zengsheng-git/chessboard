@@ -126,6 +126,19 @@ pub async fn set_engine_hash(size: usize) {
 }
 
 #[tauri::command]
+pub async fn set_engine_show_wdl(open: bool) {
+    let state = SHARED_STATE.get().unwrap();
+    {
+        let mut config = state.config.write().unwrap();
+        config.engine.show_wdl = open;
+        config.save();
+    }
+    // 先释放配置写锁再取引擎锁, 避免与监听线程(持引擎锁后取配置读锁)互相等待
+    state.engine.lock().unwrap().set_show_wdl(open);
+    debug!("set_engine_show_wdl: {}", open);
+}
+
+#[tauri::command]
 pub async fn set_engine_multipv(num: usize) {
     let state = SHARED_STATE.get().unwrap();
     let mut config = state.config.write().unwrap();

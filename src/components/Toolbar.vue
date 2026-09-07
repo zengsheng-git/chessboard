@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { onMounted, ref, h, computed } from "vue";
 import { useDialog } from "naive-ui";
 import {
@@ -46,7 +47,7 @@ interface EngineConfig {
     threads: number;
     hash: number;
     multipv: number;
-    // show_wdl: number;
+    show_wdl: boolean;
     chessdb_enabled: boolean;
     chessdb_timeout: number;
     alt_score_gap: number;
@@ -60,6 +61,7 @@ const config = ref<EngineConfig>({
     threads: 0,
     hash: 0,
     multipv: 0,
+    show_wdl: false,
     chessdb_enabled: false,
     chessdb_timeout: 0,
     alt_score_gap: 0,
@@ -70,6 +72,16 @@ const isEngineRunning = ref(false);
 
 onMounted(async () => {
     await getEngineConfig();
+    // 目标窗口关闭等异常导致监听结束时, 同步按钮状态并提示
+    listen("listen_stopped", (event) => {
+        isEngineRunning.value = false;
+        dialog.warning({
+            title: "监听停止",
+            content: String(event.payload),
+            positiveText: "确定",
+            showIcon: true,
+        });
+    });
 });
 
 async function copy_fen() {}
@@ -229,7 +241,8 @@ async function setEngineDepth() {
 }
 
 async function setEngineTime() {
-    await invoke("set_engine_time", { time: Math.round(config.value.time * 1000) });
+    // 界面单位为秒, 后端保存时转换为毫秒
+    await invoke("set_engine_time", { time: config.value.time });
 }
 
 async function setEngineThreads() {
@@ -238,6 +251,10 @@ async function setEngineThreads() {
 
 async function setEngineHash() {
     await invoke("set_engine_hash", { size: config.value.hash });
+}
+
+async function setShowWdl() {
+    await invoke("set_engine_show_wdl", { open: config.value.show_wdl });
 }
 
 async function setEngineMultipv() {
@@ -389,6 +406,9 @@ async function toggleEngine() {
                             style="width: 120px"
                             @update:value="setEngineAltScoreGap"
                         />
+                    </n-form-item>
+                    <n-form-item label="胜率显示">
+                        <n-switch v-model:value="config.show_wdl" @update:value="setShowWdl" />
                     </n-form-item>
                     <n-form-item label="启用云库">
                         <n-switch v-model:value="config.chessdb_enabled" @update:value="setChessdb" />

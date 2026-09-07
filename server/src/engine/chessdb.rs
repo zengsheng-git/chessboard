@@ -74,24 +74,38 @@ pub async fn query(fen: &str, timeout: u64, multipv: usize, alt_score_gap: isize
                     if records.alternatives.len() >= max_alt {
                         break;
                     }
-                    if let Some(rest) = item.strip_prefix("move:") {
-                        // rest 形如 "xxx,score:yyy,rank:z"
-                        let mut parts = rest.split(',');
-                        let mv = parts.next().unwrap_or("").to_string();
-                        let mut sc: Option<isize> = None;
-                        for part in parts {
-                            if let Some(v) = part.strip_prefix("score:") {
-                                sc = v.parse().ok();
-                            }
-                        }
-                        if mv.is_empty() || Some(&mv) == best.as_ref() {
-                            continue;
-                        }
-                        // 只保留分数接近最优的好招（score 缺失时不过滤）
-                        if sc.map_or(true, |s| s >= records.score - alt_score_gap) {
-                            records.alternatives.push(mv);
+                if let Some(rest) = item.strip_prefix("move:") {
+                    // rest 形如 "xxx,score:yyy,rank:z,note:...,winrate:nn.nn"
+                    let mut parts = rest.split(',');
+                    let mv = parts.next().unwrap_or("").to_string();
+                    let mut sc: Option<isize> = None;
+                    let mut wr: Option<f64> = None;
+                    for part in parts {
+                        if let Some(v) = part.strip_prefix("score:") {
+                            sc = v.parse().ok();
+                        } else if let Some(v) = part.strip_prefix("winrate:") {
+                            wr = v.parse().ok();
                         }
                     }
+                    if mv.is_empty() {
+                        continue;
+                    }
+                    // 最优招法的胜率(百分比转千分比)
+                    if Some(&mv) == best.as_ref() {
+                        if let Some(pct) = wr {
+                            records.winrate = Some(((pct * 10.0).round() as usize).min(1000));
+                        }
+                        continue;
+                    }
+                    if records.alternatives.len() >= max_alt {
+                        break;
+                    }
+                    // 只保留分数接近最优的好招（score 缺失时不过滤）
+                    if sc.map_or(true, |s| s >= records.score - alt_score_gap) {
+                        records.alternatives.push(mv);
+                        records.alt_scores.push(sc.map_or(-1, |s| records.score - s));
+                    }
+                }
                 }
             }
             Err(e) => {

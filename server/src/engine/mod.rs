@@ -17,13 +17,35 @@ pub struct QueryResult {
     pub pvs: Vec<String>,        // 最优线完整着法(iccs)
     pub moves: Vec<String>,      // 最优线完整着法(chinese)
     pub alternatives: Vec<String>, // 次优候选首着(iccs)
+    pub alt_scores: Vec<isize>,  // 次优候选与最优的分差, 负值=未知
     pub alt_moves: Vec<String>,  // 次优候选首着(chinese)
+    pub notes: Vec<String>,      // 最优招法战术标注
+    pub winrate: Option<usize>,  // 行棋方胜率(千分比, 仅引擎来源提供)
+    pub deviation: Option<DeviationCost>, // 上一步非预期走子的代价
     pub state: QueryState,       // 状态
     pub source: String,          // 来源
     pub camp: char,              // 行棋方阵营 'w'/'b'
 }
 
+// 上一步偏离预期的代价
+#[derive(Debug, serde::Serialize, Clone, Copy)]
+pub struct DeviationCost {
+    pub camp: char,  // 偏离预期的一方 'w'/'b'
+    pub loss: isize, // 相对预期的分差(偏离方视角, 正=亏损)
+}
+
 const SOURCE_ENGINE: &str = "引擎";
+
+// 引擎单行 info 解析结果
+#[derive(Default)]
+struct InfoLine {
+    multipv: Option<usize>,
+    pvs: Vec<String>,
+    depth: usize,
+    score: isize,
+    time: usize,
+    winrate: Option<usize>,
+}
 
 #[derive(Debug, serde::Serialize, Default, Clone, Copy)]
 pub enum QueryState {
@@ -56,7 +78,7 @@ impl Default for EngineConfig {
             threads: 4,
             hash: 64,
             multipv: 3,
-            show_wdl: false,
+            show_wdl: true,
             chessdb_enabled: true,
             chessdb_timeout: 5,
             alt_score_gap: 300,
@@ -126,39 +148,42 @@ impl Engine {
         line.trim().to_string()
     }
 
-    // 解析一行 info，返回 (multipv编号, pv序列, depth, score, time)
-    fn parse_info(&self, line: &str) -> (Option<usize>, Vec<String>, usize, isize, usize) {
+    // 解析一行 info
+    fn parse_info(&self, line: &str) -> InfoLine {
         let mut iter = line.split_whitespace();
         // 跳过 "info"
         iter.next();
-        let mut multipv = None;
-        let mut pvs = Vec::new();
-        let mut depth = 0;
-        let mut score = 0;
-        let mut time = 0;
+        let mut info = InfoLine::default();
         loop {
             let Some(key) = iter.next() else { break };
             match key {
-                "depth" => depth = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-                "time" => time = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-                "multipv" => multipv = iter.next().and_then(|v| v.parse().ok()),
+                "depth" => info.depth = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                "time" => info.time = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                "multipv" => info.multipv = iter.next().and_then(|v| v.parse().ok()),
+                "wdl" => {
+                    // wdl 为胜/和/负千分比, 取行棋方胜率
+                    let win: usize = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let _draw: usize = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let _loss: usize = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    info.winrate = Some(win);
+                }
                 "score" => match iter.next().unwrap_or("") {
-                    "cp" => score = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    "cp" => info.score = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                     "mate" => {
                         let round: isize = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                        score = if round > 0 { 30000 - round } else { -(30000 + round) };
+                        info.score = if round > 0 { 30000 - round } else { -(30000 + round) };
                     }
                     _ => {}
                 },
                 "pv" => {
                     // pv 是 info 行最后一个字段，收集剩余所有着法
-                    pvs.extend(iter.by_ref().map(|s| s.to_string()));
+                    info.pvs.extend(iter.by_ref().map(|s| s.to_string()));
                     break;
                 }
                 _ => {}
             }
         }
-        (multipv, pvs, depth, score, time)
+        info
     }
 
     // 执行引擎搜索，返回解析后的结果（含多候选）
@@ -181,25 +206,27 @@ impl Engine {
             if !line.starts_with("info") {
                 continue;
             }
-            let (multipv, pvs, depth, score, time) = self.parse_info(&line);
-            if pvs.is_empty() {
+            let info = self.parse_info(&line);
+            if info.pvs.is_empty() {
                 continue;
             }
-            last_pvs = pvs.clone();
-            match multipv {
+            last_pvs = info.pvs.clone();
+            match info.multipv {
                 Some(id) => {
-                    pvs_by_id.insert(id, (pvs, score));
+                    pvs_by_id.insert(id, (info.pvs, info.score));
                     if id == 1 {
-                        result.depth = depth;
-                        result.score = score;
-                        result.time = time;
+                        result.depth = info.depth;
+                        result.score = info.score;
+                        result.time = info.time;
+                        result.winrate = info.winrate;
                     }
                 }
                 None => {
                     // 无 multipv 字段，视为单候选
-                    result.depth = depth;
-                    result.score = score;
-                    result.time = time;
+                    result.depth = info.depth;
+                    result.score = info.score;
+                    result.time = info.time;
+                    result.winrate = info.winrate;
                 }
             }
         }
@@ -215,6 +242,7 @@ impl Engine {
             if let Some(first) = pvs.first() {
                 if *sc >= result.score - alt_score_gap {
                     result.alternatives.push(first.clone());
+                    result.alt_scores.push(result.score - sc);
                 }
             }
         }
@@ -237,12 +265,13 @@ impl Engine {
                     let max_alt = params.multipv.saturating_sub(1);
                     self.position(fen);
                     let eng = self.bestmove(params.depth, params.time, params.multipv, params.alt_score_gap);
-                    for alt in eng.alternatives {
+                    for (alt, gap) in eng.alternatives.into_iter().zip(eng.alt_scores) {
                         if result.alternatives.len() >= max_alt {
                             break;
                         }
                         if Some(&alt) != best.as_ref() && !result.alternatives.contains(&alt) {
                             result.alternatives.push(alt);
+                            result.alt_scores.push(gap);
                         }
                     }
                 }
