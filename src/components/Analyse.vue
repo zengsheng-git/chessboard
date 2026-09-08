@@ -3,6 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import { NCard, NFlex, NTag, NText } from 'naive-ui';
 import { computed, ref } from 'vue';
 
+import { evalText, formatGap, winrateText as formatWinrate } from '../format';
+
 interface Analyse {
     depth: number,   // 深度
     score: number,   // 得分
@@ -12,27 +14,27 @@ interface Analyse {
     alternatives: string[], // 次优候选首着(iccs)
     alt_scores: number[], // 次优候选与最优的分差, 负值=未知
     alt_moves: string[], // 次优候选(chinese)
-    notes: string[], // 最优招法战术标注
     winrate: number | null, // 行棋方胜率(千分比, 仅引擎来源)
     deviation: { camp: string; loss: number } | null, // 上一步非预期走子的代价
+    board: { piece: string; pos: string }[], // 分析时的局面, 供主线预演
     state: string,   // 状态
     source: string,  // 来源
     camp: string,    // 行棋方阵营 'w'/'b'
 }
 
 
-const notes = ref<string[]>([])
 const followUps = ref<string[]>([])
 const pvs = ref<string[]>([])
 const deviation = ref<{ camp: string; loss: number } | null>(null)
 const winrate = ref<number | null>(null)
 const lastScore = ref(0)
+const analysisBoard = ref<{ piece: string; pos: string }[]>([])
 const alternatives = ref<string[]>([])
 const altScores = ref<number[]>([])
 // 我方阵营，根据 mirror 事件推导（mirror=true 表示我方执黑）
 const myCamp = ref<'w' | 'b'>('w')
-// 最优招法是否我方行棋, 后续招法按行棋方交替推演
-const isBestMine = ref(true)
+// 最优招法的行棋方阵营('w'红/'b'黑), 后续招法按行棋方交替推演
+const bestCamp = ref<"w" | "b">("w")
 const best = ref({
     move: "----",
     side: "--",
@@ -55,14 +57,16 @@ listen('analyse', async (event) => {
     pvs.value = data.pvs ?? [];
     winrate.value = data.winrate ?? null;
     deviation.value = data.deviation ?? null;
+    analysisBoard.value = data.board ?? [];
+    // 新分析到达时旧主线已过期, 若正处预演态则强制还原, 避免悬停元素被重渲染后 mouseleave 丢失导致预演卡死
+    if (previewActive) restoreBoard();
     alternatives.value = data.alt_moves ?? [];
     altScores.value = data.alt_scores ?? [];
-    notes.value = data.notes ?? [];
     // 主线后续应对: moves[0] 是最优招法本身, 之后为双方接下来的推演着法(对方→我方交替)
     followUps.value = data.moves.slice(1);
     const isMine = data.camp === myCamp.value;
-    isBestMine.value = isMine;
-    best.value.side = isMine ? "我方" : "对方";
+    bestCamp.value = data.camp === "b" ? "b" : "w";
+    best.value.side = data.camp === "w" ? "红方" : "黑方";
     const evalResult = formatEval(data.score, isMine);
     best.value.evalText = evalResult.text;
     best.value.evalType = evalResult.type;
@@ -85,50 +89,27 @@ listen('analyse', async (event) => {
 })
 
 
-// 分数解读：与最佳/次优/深度统一按行棋方视角，不带阵营标签（归属见标题），
-// 正=行棋方占优，负=行棋方劣势；颜色按我方利益着色：红=利好我方，绿=利好对方
+// 分数解读：统一行棋方视角文字(见 format.ts)，颜色按我方利益着色：红=利好我方，绿=利好对方
 function formatEval(score: number, isMine: boolean): { text: string, type: "error" | "success" | "info" } {
-    const abs = Math.abs(score);
     const goodForMe = isMine === (score > 0);
-    const type: "error" | "success" = goodForMe ? "error" : "success";
-    // 杀棋编码（行棋方视角）：正 = 行棋方杀，负 = 行棋方被杀
-    if (score >= 29000) return { text: `${30000 - score}步杀`, type };
-    if (score <= -30001) return { text: `${-score - 30000}步被杀`, type };
-    if (score <= -29000) return { text: `${30000 + score}步被杀`, type };
-    if (abs < 30) return { text: "均势", type: "info" };
-    const gradePos = ["略优", "较优", "大优", "胜势"];
-    const gradeNeg = ["略差", "较差", "大差", "败势"];
-    const idx = abs < 150 ? 0 : abs < 400 ? 1 : abs < 800 ? 2 : 3;
-    return score > 0
-        ? { text: `+${abs} ${gradePos[idx]}`, type }
-        : { text: `-${abs} ${gradeNeg[idx]}`, type };
-}
-
-// 次优招法分差展示: 0 表示与最优同级; 负值=未知, 不展示
-function formatGap(gap: number | undefined): string {
-    if (gap === undefined || gap < 0) return "";
-    if (gap === 0) return "±0";
-    return `-${gap}`;
+    return { text: evalText(score), type: goodForMe ? "error" : "success" };
 }
 
 // 后续招法与最优招法的行棋方交替: 偶数索引是行棋方的对手, 奇数索引回到行棋方
 function followUpSide(index: number): string {
-    const isMine = index % 2 === 1 ? isBestMine.value : !isBestMine.value;
-    return isMine ? "我方" : "对方";
+    const moverRed = bestCamp.value === "w";
+    const isMover = index % 2 === 1;
+    return (isMover ? moverRed : !moverRed) ? "红方" : "黑方";
 }
 
 // 胜率展示: 引擎来源提供, 杀棋局面下无意义不展示
-const winrateText = computed(() => {
-    if (winrate.value === null || winrate.value === undefined) return "";
-    if (Math.abs(lastScore.value) >= 29000) return "";
-    return `胜率 ${Math.round(winrate.value / 10)}%`;
-});
+const winrateText = computed(() => formatWinrate(winrate.value, lastScore.value));
 
 // 偏离提示代价: 颜色沿用面板约定, 红=利好我方, 绿=利好对方
 const deviationText = computed(() => {
     if (!deviation.value) return null;
     const mine = deviation.value.camp === myCamp.value;
-    const who = mine ? "我方" : "对方";
+    const who = deviation.value.camp === "w" ? "红方" : "黑方";
     const loss = deviation.value.loss;
     if (Math.abs(loss) <= 30) {
         return { text: `${who}偏离提示, 与预期相当`, type: "info" as const };
@@ -140,59 +121,23 @@ const deviationText = computed(() => {
         : { text: `${who}偏离提示, 反赚 ${-loss} 分`, type };
 });
 
-// ===== 主线预演: 悬停后续招法时在棋盘上摆出对应局面, 移开还原 =====
+// ===== 主线预演: 通知棋盘组件从分析时局面重放着法, 移开按最新实时局面还原 =====
 
-let savedPieces: { id: string; piece: string }[] | null = null;
-const ALL_IDS: string[] = [];
-for (let y = 9; y >= 0; y--) {
-    for (let x = 0; x < 9; x++) {
-        ALL_IDS.push(`${"abcdefghi"[x]}${y}`);
-    }
-}
-
-function pieceClassAt(id: string): string {
-    const ele = document.getElementById(id)?.firstElementChild;
-    let piece = "";
-    ele?.classList.forEach((cls) => {
-        if (cls.startsWith("piece-")) piece = cls;
-    });
-    return piece;
-}
-
-function clearPieceAt(id: string) {
-    const ele = document.getElementById(id)?.firstElementChild;
-    ele?.classList.forEach((cls) => {
-        if (cls !== "piece") ele?.classList.remove(cls);
-    });
-}
-
-function applyIccs(mv: string) {
-    const from = mv.substring(0, 2);
-    const to = mv.substring(2, 4);
-    const token = pieceClassAt(from);
-    if (!token) return;
-    clearPieceAt(from);
-    clearPieceAt(to);
-    document.getElementById(to)?.firstElementChild?.classList.add(token);
-}
+let previewActive = false;
 
 // 悬停后续招法第 index 项: 预演主线前 index+2 步(含最优招法)
 function previewLine(index: number) {
-    if (!pvs.value.length) return;
-    if (!savedPieces) {
-        savedPieces = ALL_IDS.map((id) => ({ id, piece: pieceClassAt(id) }));
-    }
-    const count = Math.min(index + 2, pvs.value.length);
-    for (let i = 0; i < count; i++) applyIccs(pvs.value[i]);
+    if (!pvs.value.length || !analysisBoard.value.length) return;
+    previewActive = true;
+    window.dispatchEvent(new CustomEvent("preview-line", {
+        detail: { board: analysisBoard.value, pvs: pvs.value, count: Math.min(index + 2, pvs.value.length) },
+    }));
 }
 
 function restoreBoard() {
-    if (!savedPieces) return;
-    for (const { id, piece } of savedPieces) {
-        clearPieceAt(id);
-        if (piece) document.getElementById(id)?.firstElementChild?.classList.add(piece);
-    }
-    savedPieces = null;
+    if (!previewActive) return;
+    previewActive = false;
+    window.dispatchEvent(new CustomEvent("preview-end"));
 }
 
 </script>
@@ -215,7 +160,6 @@ function restoreBoard() {
             <n-text v-if="winrateText" depth="3">{{ winrateText }}</n-text>
         </n-flex>
         <n-text v-if="deviationText" :type="deviationText.type" class="notes">{{ deviationText.text }}</n-text>
-        <n-text v-if="notes.length" depth="3" class="notes">{{ notes.join(" · ") }}</n-text>
         <div v-if="followUps.length" class="follow-ups">
             <n-text depth="3">后续：</n-text>
             <div

@@ -30,6 +30,11 @@ const options = [
         disabled: false,
     },
     {
+        label: "局势推演",
+        value: "Practice",
+        disabled: false,
+    },
+    {
         label: "连线对战",
         value: "LinkPlay",
         disabled: true,
@@ -53,7 +58,8 @@ interface EngineConfig {
     alt_score_gap: number;
 }
 
-const mode = ref(options[0].value);
+// 模式由父组件(App)持有, 推演等面板按模式切换显示
+const mode = defineModel<string>("mode", { default: "LinkAnaly" });
 
 const config = ref<EngineConfig>({
     depth: 0,

@@ -1,20 +1,6 @@
 use crate::chess::Camp;
-use crate::chess::get_piece_name;
 
 pub type Board = [[char; 9]; 10];
-
-// 子力价值(×10), 用于判断交换是否划算
-pub fn piece_value(piece: char) -> i32 {
-    match piece {
-        'R' | 'r' => 90,
-        'C' | 'c' => 45,
-        'N' | 'n' => 40,
-        'A' | 'a' | 'B' | 'b' => 20,
-        'P' | 'p' => 10,
-        'K' | 'k' => 1000,
-        _ => 0,
-    }
-}
 
 fn same_camp(camp: &Camp, piece: char) -> bool {
     match camp {
@@ -130,19 +116,6 @@ pub fn is_attacked(board: &Board, camp: &Camp, tx: usize, ty: usize) -> bool {
     false
 }
 
-// (x,y) 处棋子攻击到的所有格子
-pub fn attacked_squares(board: &Board, x: usize, y: usize) -> Vec<(usize, usize)> {
-    let mut squares = Vec::new();
-    for ty in 0..10 {
-        for tx in 0..9 {
-            if piece_attacks(board, x, y, tx, ty) {
-                squares.push((tx, ty));
-            }
-        }
-    }
-    squares
-}
-
 fn find_king(board: &Board, king: char) -> Option<(usize, usize)> {
     for y in 0..10 {
         for x in 0..9 {
@@ -154,97 +127,65 @@ fn find_king(board: &Board, king: char) -> Option<(usize, usize)> {
     None
 }
 
-// 解读一步棋的意图: 解将/吃子/将军/威胁/己方暴露。
-// 纯静态判断, 仅供界面展示, 不参与选招。
-pub fn explain_move(board: &Board, camp: &Camp, iccs: &str) -> Vec<String> {
-    let mut notes = Vec::new();
-    if camp.eq(&Camp::None) {
-        return notes;
+// (x,y) 处棋子走到 (tx,ty) 是否符合走法规则(不含送将检查)。
+// 与攻击语义的差异仅在炮: 走空格不能有炮架, 吃子需恰好一个炮架。
+fn pseudo_legal_move(board: &Board, camp: &Camp, x: usize, y: usize, tx: usize, ty: usize) -> bool {
+    if x == tx && y == ty {
+        return false;
     }
-    let mut chars = iccs.chars();
-    let fx = chars.next().unwrap() as usize - 97;
-    let fy = 57 - chars.next().unwrap() as usize;
-    let tx = chars.next().unwrap() as usize - 97;
-    let ty = 57 - chars.next().unwrap() as usize;
-
-    let piece = board[fy][fx];
+    let piece = board[y][x];
     if piece == ' ' {
-        return notes;
+        return false;
     }
-    let enemy = camp.opposite();
-
-    // 走之前已被将军, 此步为应将
-    if let Some((kx, ky)) = find_king(board, my_king(camp))
-        && is_attacked(board, &enemy, kx, ky)
-    {
-        notes.push("解将".to_string());
+    let target = board[ty][tx];
+    if target != ' ' && same_camp(camp, target) {
+        return false;
     }
-
-    // 吃掉对方棋子
-    let captured = board[ty][tx];
-    if captured != ' ' {
-        let prefix = if tx == 4 && (captured == 'p' || captured == 'P') { "中" } else { "对方" };
-        notes.push(format!("吃掉{}{}", prefix, get_piece_name(captured)));
-    }
-
-    let mut after = *board;
-    after[ty][tx] = piece;
-    after[fy][fx] = ' ';
-
-    // 走完后攻击对方将
-    let gave_check =
-        find_king(&after, my_king(&enemy)).is_some_and(|(kx, ky)| is_attacked(&after, camp, kx, ky));
-    if gave_check {
-        notes.push("将军".to_string());
-    }
-
-    // 威胁: 移动后的棋子攻击到无保护、或子力价值低于己方的敌子
-    let enemy_king = my_king(&enemy);
-    let mut names: Vec<char> = Vec::new();
-    for (sx, sy) in attacked_squares(&after, tx, ty) {
-        let target = after[sy][sx];
-        if target == ' ' || target == enemy_king || !same_camp(&enemy, target) {
-            continue;
+    if matches!(piece, 'C' | 'c') {
+        if x != tx && y != ty {
+            return false;
         }
-        let defended = is_attacked(&after, &enemy, sx, sy);
-        if !defended || piece_value(piece) < piece_value(target) {
-            let name = get_piece_name(target);
-            if !names.contains(&name) {
-                names.push(name);
+        let screens = count_between(board, x, y, tx, ty);
+        return if target == ' ' { screens == 0 } else { screens == 1 };
+    }
+    piece_attacks(board, x, y, tx, ty)
+}
+
+fn iccs(x: usize, y: usize, tx: usize, ty: usize) -> String {
+    let files = b"abcdefghi";
+    format!("{}{}{}{}", files[x] as char, 9 - y, files[tx] as char, 9 - ty)
+}
+
+// camp 方所有合法着法(iccs): 走完后己方将不被攻击(含将帅对脸)。
+// 局面缺将(识别异常)时跳过送将检查。
+pub fn legal_moves(board: &Board, camp: &Camp) -> Vec<String> {
+    let mut moves = Vec::new();
+    for y in 0..10 {
+        for x in 0..9 {
+            let piece = board[y][x];
+            if piece == ' ' || !same_camp(camp, piece) {
+                continue;
+            }
+            for ty in 0..10 {
+                for tx in 0..9 {
+                    if !pseudo_legal_move(board, camp, x, y, tx, ty) {
+                        continue;
+                    }
+                    let mut next = *board;
+                    next[ty][tx] = piece;
+                    next[y][x] = ' ';
+                    let safe = match find_king(&next, my_king(camp)) {
+                        Some((kx, ky)) => !is_attacked(&next, &camp.opposite(), kx, ky),
+                        None => true,
+                    };
+                    if safe {
+                        moves.push(iccs(x, y, tx, ty));
+                    }
+                }
             }
         }
     }
-    for name in names {
-        notes.push(format!("威胁对方{}", name));
-    }
-
-    // 走完后己方重要棋子无保护且被攻击, 提醒最高值的一个; 兵卒忽略减少噪音, 将军时对方必应将也不提醒
-    if !gave_check {
-        let mut worst: Option<(i32, char)> = None;
-        for y in 0..10 {
-            for x in 0..9 {
-                let mine = after[y][x];
-                if mine == ' ' || mine == my_king(camp) || !same_camp(camp, mine) {
-                    continue;
-                }
-                let value = piece_value(mine);
-                if value <= piece_value('P') {
-                    continue;
-                }
-                if is_attacked(&after, &enemy, x, y)
-                    && !is_attacked(&after, camp, x, y)
-                    && worst.map_or(true, |(v, _)| value > v)
-                {
-                    worst = Some((value, mine));
-                }
-            }
-        }
-        if let Some((_, mine)) = worst {
-            notes.push(format!("注意:{}被捉", get_piece_name(mine)));
-        }
-    }
-
-    notes
+    moves
 }
 
 #[cfg(test)]
@@ -272,19 +213,34 @@ mod tests {
     }
 
     #[test]
-    fn test_explain_capture_and_check() {
-        // 车吃中卒并形成同线将军
-        let board = fen_to_board("4k4/9/9/9/9/R3p3/9/9/9/4K4 w");
-        let notes = explain_move(&board, &Camp::Red, "a4e4");
-        assert!(notes.contains(&"吃掉中卒".to_string()));
-        assert!(notes.contains(&"将军".to_string()));
+    fn test_startpos_legal_moves() {
+        let board = fen_to_board("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w");
+        let moves = legal_moves(&board, &Camp::Red);
+        // 开局公认合法着法数: 兵5 炮24 马4 车4 相4 仕2 帅1
+        assert_eq!(moves.len(), 44);
+        assert!(moves.contains(&"b0c2".to_string()));
+        assert!(moves.contains(&"a0a1".to_string()));
+        // 不能吃自己的马
+        assert!(!moves.contains(&"a0b0".to_string()));
     }
 
     #[test]
-    fn test_explain_threat() {
-        // 炮平中路上去, 有炮架, 威胁对方无保护的马
-        let board = fen_to_board("4k4/9/9/4n4/4P4/9/9/4C4/9/4K4 w");
-        let notes = explain_move(&board, &Camp::Red, "e2e4");
-        assert!(notes.contains(&"威胁对方马".to_string()));
+    fn test_cannon_move_and_capture() {
+        // 炮 e3: 平移无阻, 上行有 P 作炮架可吃 r, 无炮架不可移动到炮架上
+        let board = fen_to_board("4k4/9/9/4r4/9/4P4/4C4/9/9/4K4 w");
+        let moves = legal_moves(&board, &Camp::Red);
+        assert!(moves.contains(&"e3e6".to_string()));
+        assert!(!moves.contains(&"e3e5".to_string()));
+        assert!(!moves.contains(&"e3e4".to_string()));
+    }
+
+    #[test]
+    fn test_facing_king_forbidden() {
+        // 黑将在 d9(3,0), 红帅 e0(4,9): 帅平到 d0 会形成对脸, 被禁止
+        let board = fen_to_board("3k4/9/9/9/9/9/9/9/9/4K4 w");
+        let moves = legal_moves(&board, &Camp::Red);
+        assert!(moves.contains(&"e0f0".to_string()));
+        assert!(moves.contains(&"e0e1".to_string()));
+        assert!(!moves.contains(&"e0d0".to_string()));
     }
 }

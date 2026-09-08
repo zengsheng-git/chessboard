@@ -12,7 +12,6 @@ use tracing::warn;
 use xcap::image::ImageBuffer;
 use xcap::image::Rgba;
 
-use crate::attack;
 use crate::chess;
 use crate::common;
 use crate::engine::DeviationCost;
@@ -173,9 +172,12 @@ pub fn get_board(image: ImageBuffer<Rgba<u8>, Vec<u8>>) -> Option<(chess::Camp, 
     }
 }
 
-pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10], camp: &chess::Camp, prev: Option<(chess::Camp, isize)>) -> Option<(chess::Changed, [[char; 9]; 10])> {
+// 将引擎/云库结果整理为完整展示数据(中文主线/次优/局面/偏离等), 镜像与推演共用
+pub fn prepare_result(
+    mut result: QueryResult, board: [[char; 9]; 10], camp: &chess::Camp, prev: Option<(chess::Camp, isize)>,
+) -> Option<(QueryResult, chess::Changed, [[char; 9]; 10])> {
     // 云库/引擎可能返回成功状态但缺少着法, 跳过本次展示, 避免监听线程 panic
-    let Some(best_pv) = result.pvs.first() else {
+    let Some(best_pv) = result.pvs.first().cloned() else {
         warn!("分析结果缺少着法, 跳过展示: {:?}", result.state);
         return None;
     };
@@ -186,11 +188,11 @@ pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10],
     {
         result.deviation = Some(DeviationCost { camp: dev_camp.to_char(), loss: prev_score + result.score });
     }
-    let best_move = chess::board_move_chinese(board, best_pv);
-    let expect_board = chess::board_move(board, best_pv);
-    let expect_move = chess::Changed::from_pv(best_pv, board);
-    // 标注最优招法意图(吃子/将军/威胁等), 仅供界面展示, 不参与选招
-    result.notes = attack::explain_move(&board, camp, best_pv);
+    let best_move = chess::board_move_chinese(board, &best_pv);
+    let expect_board = chess::board_move(board, &best_pv);
+    let expect_move = chess::Changed::from_pv(&best_pv, board);
+    // 携带分析时局面, 供前端主线预演
+    result.board = chess::board_map(board);
 
     let mut tmp_board = expect_board;
     result.moves.push(best_move);
@@ -205,6 +207,11 @@ pub fn analyse(app: &AppHandle, mut result: QueryResult, board: [[char; 9]; 10],
     }
     // 标记本次分析的行棋方阵营
     result.camp = camp.to_char();
+    Some((result, expect_move, expect_board))
+}
+
+pub fn analyse(app: &AppHandle, result: QueryResult, board: [[char; 9]; 10], camp: &chess::Camp, prev: Option<(chess::Camp, isize)>) -> Option<(chess::Changed, [[char; 9]; 10])> {
+    let (result, expect_move, expect_board) = prepare_result(result, board, camp, prev)?;
     // 把结果发送给前端
     info!("分析结果 {:?}", result);
     app.emit("analyse", result).unwrap();

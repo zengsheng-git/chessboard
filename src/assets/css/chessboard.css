@@ -1,4 +1,5 @@
-#chessboard {
+#chessboard,
+#practiceboard {
     width: 360px;
     /* 棋盘图片的宽度 */
     height: 400px;
@@ -17,6 +18,11 @@
     text-decoration: none;
     display: block;
     text-decoration-style: solid;
+}
+
+/* 推演盘位于观看页右侧(推演模式窗口加宽后并排显示) */
+#practiceboard {
+    left: 672px;
 }
 
 .piece-wrap {
@@ -87,6 +93,19 @@
 
 .alt-select {
     box-shadow: 0 0 0 2px #9b59b6;
+    z-index: 2;
+}
+
+/* 推演盘: 选中棋子与合法落点 */
+.sel-select {
+    box-shadow: 0 0 0 3px #f39c12;
+    background-color: rgba(243, 156, 18, 0.3);
+    z-index: 2;
+}
+
+.mv-select {
+    box-shadow: inset 0 0 0 2px rgba(46, 204, 113, 0.55);
+    background-color: rgba(46, 204, 113, 0.08);
     z-index: 2;
 }
 

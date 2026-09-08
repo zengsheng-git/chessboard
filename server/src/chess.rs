@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use serde::Deserialize;
 use serde::Serialize;
 use tracing::warn;
 
@@ -17,10 +18,10 @@ pub const BOARD_MAP: [[&str; 9]; 10] = [
     ["a0", "b0", "c0", "d0", "e0", "f0", "g0", "h0", "i0"],
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct Position {
-    piece: char,
-    pos: String,
+    pub piece: char,
+    pub pos: String,
 }
 
 #[derive(Debug)]

@@ -14,6 +14,7 @@ mod config;
 mod engine;
 mod listen;
 mod logger;
+mod practice;
 mod worker;
 mod yolo;
 
@@ -35,10 +36,12 @@ pub fn run() {
             let _ = SHARED_STATE.get_or_init(|| {
                 let config = config::Config::load(&app.path().config_dir().unwrap());
                 let lib_path = app.path().resolve("../libs/pikafish", tauri::path::BaseDirectory::Resource).unwrap();
-                let mut engine = engine::Engine::new(&lib_path);
+                let (child, stdin, stop_stdin) = engine::command::new(&lib_path);
+                let mut engine = engine::Engine::from_child(child, stdin, &lib_path);
                 engine.set_show_wdl(config.engine.show_wdl);
                 engine.set_hash(config.engine.hash);
                 engine.set_threads(config.engine.threads);
+                practice::set_stop_writer(stop_stdin);
 
                 SharedState {
                     config: Arc::new(RwLock::new(config)),
@@ -64,6 +67,12 @@ pub fn run() {
             config::set_engine_multipv,
             config::set_engine_alt_score_gap,
             config::set_chessdb,
+            practice::practice_start,
+            practice::practice_moves,
+            practice::practice_do_move,
+            practice::practice_undo,
+            practice::practice_reset,
+            practice::practice_analyze,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -74,5 +83,7 @@ fn reload_engine(app: tauri::AppHandle) {
     let lib_path = app.path().resolve("../libs/pikafish", tauri::path::BaseDirectory::Resource).unwrap();
     let state = SHARED_STATE.get().unwrap();
     let engine_config = state.config.read().unwrap().engine;
-    state.engine.lock().unwrap().reload(&lib_path, &engine_config);
+    let mut engine = state.engine.lock().unwrap();
+    let stop_stdin = engine.reload(&lib_path, &engine_config);
+    practice::set_stop_writer(stop_stdin);
 }

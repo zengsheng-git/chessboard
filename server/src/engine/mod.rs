@@ -4,7 +4,9 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 use std::path::Path;
-mod command;
+use std::process::Child;
+use std::process::ChildStdin;
+pub(crate) mod command;
 
 use tracing::debug;
 use tracing::trace;
@@ -19,7 +21,7 @@ pub struct QueryResult {
     pub alternatives: Vec<String>, // 次优候选首着(iccs)
     pub alt_scores: Vec<isize>,  // 次优候选与最优的分差, 负值=未知
     pub alt_moves: Vec<String>,  // 次优候选首着(chinese)
-    pub notes: Vec<String>,      // 最优招法战术标注
+    pub board: Vec<crate::chess::Position>, // 分析时的局面, 供前端主线预演
     pub winrate: Option<usize>,  // 行棋方胜率(千分比, 仅引擎来源提供)
     pub deviation: Option<DeviationCost>, // 上一步非预期走子的代价
     pub state: QueryState,       // 状态
@@ -100,27 +102,25 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    pub fn new(libs: &Path) -> Self {
-        let mut child = command::new(libs);
-
+    pub fn from_child(mut child: Child, stdin: ChildStdin, libs: &Path) -> Self {
         let nnue = libs.join("pikafish.nnue");
-
-        let stdin = Box::new(child.stdin.take().unwrap());
+        let stdin = Box::new(stdin);
         let stdout = Box::new(BufReader::new(child.stdout.take().unwrap()));
-
         let mut eng = Engine { stdin, stdout, child };
         eng.setoption("EvalFile", nnue.display());
         eng.setoption("Sixty Move Rule", false);
         eng
     }
-
-    pub fn reload(&mut self, libs: &Path, config: &EngineConfig) {
+    // 重建引擎子进程, 返回新的 stop 写入口
+    pub fn reload(&mut self, libs: &Path, config: &EngineConfig) -> Option<std::process::ChildStdin> {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
-        *self = Self::new(libs);
+        let (child, stdin, stop_stdin) = command::new(libs);
+        *self = Self::from_child(child, stdin, libs);
         self.set_hash(config.hash);
         self.set_show_wdl(config.show_wdl);
         self.set_threads(config.threads);
+        stop_stdin
     }
 
     fn write_command<A: Display>(&mut self, args: A) {
@@ -318,7 +318,8 @@ mod tests {
         logger::init_tracer(Level::TRACE, &std::path::PathBuf::from("."));
         let fen = "4k4/9/6r2/9/9/9/9/9/4A4/4K4 w";
         let libs = path::PathBuf::from("f:/w/template/chessboard/libs/pikafish");
-        let mut eng = Engine::new(&libs);
+        let (child, stdin, _) = command::new(&libs);
+        let mut eng = Engine::from_child(child, stdin, &libs);
         let cfg = EngineConfig { chessdb_enabled: false, ..Default::default() };
         let records = eng.search(fen, &cfg).await;
         info!("{:?}", records);
