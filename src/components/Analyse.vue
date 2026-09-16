@@ -25,6 +25,7 @@ interface Analyse {
 
 const followUps = ref<string[]>([])
 const pvs = ref<string[]>([])
+const altIccs = ref<string[]>([])
 const deviation = ref<{ camp: string; loss: number } | null>(null)
 const winrate = ref<number | null>(null)
 const lastScore = ref(0)
@@ -55,6 +56,7 @@ listen('analyse', async (event) => {
     best.value.source = data.source;
     lastScore.value = data.score;
     pvs.value = data.pvs ?? [];
+    altIccs.value = data.alternatives ?? [];
     winrate.value = data.winrate ?? null;
     deviation.value = data.deviation ?? null;
     analysisBoard.value = data.board ?? [];
@@ -62,8 +64,8 @@ listen('analyse', async (event) => {
     if (previewActive) restoreBoard();
     alternatives.value = data.alt_moves ?? [];
     altScores.value = data.alt_scores ?? [];
-    // 主线后续应对: moves[0] 是最优招法本身, 之后为双方接下来的推演着法(对方→我方交替)
-    followUps.value = data.moves.slice(1);
+    // 主线完整着法: 第 1 条是最优招法本身, 之后为双方接下来的推演着法
+    followUps.value = data.moves;
     const isMine = data.camp === myCamp.value;
     bestCamp.value = data.camp === "b" ? "b" : "w";
     best.value.side = data.camp === "w" ? "红方" : "黑方";
@@ -95,10 +97,10 @@ function formatEval(score: number, isMine: boolean): { text: string, type: "erro
     return { text: evalText(score), type: goodForMe ? "error" : "success" };
 }
 
-// 后续招法与最优招法的行棋方交替: 偶数索引是行棋方的对手, 奇数索引回到行棋方
+// 主线着法按行棋方交替: 偶数索引是最优招法的行棋方, 奇数索引是对手
 function followUpSide(index: number): string {
     const moverRed = bestCamp.value === "w";
-    const isMover = index % 2 === 1;
+    const isMover = index % 2 === 0;
     return (isMover ? moverRed : !moverRed) ? "红方" : "黑方";
 }
 
@@ -125,12 +127,12 @@ const deviationText = computed(() => {
 
 let previewActive = false;
 
-// 悬停后续招法第 index 项: 预演主线前 index+2 步(含最优招法)
+// 悬停主线第 index 项: 预演到该步的局面(含最优招法)
 function previewLine(index: number) {
     if (!pvs.value.length || !analysisBoard.value.length) return;
     previewActive = true;
     window.dispatchEvent(new CustomEvent("preview-line", {
-        detail: { board: analysisBoard.value, pvs: pvs.value, count: Math.min(index + 2, pvs.value.length) },
+        detail: { board: analysisBoard.value, pvs: pvs.value, count: Math.min(index + 1, pvs.value.length) },
     }));
 }
 
@@ -140,12 +142,22 @@ function restoreBoard() {
     window.dispatchEvent(new CustomEvent("preview-end"));
 }
 
+// 悬停次优招法: 预演走该备选首着后的局面
+function previewAlt(index: number) {
+    const alt = altIccs.value[index];
+    if (!alt || alt.length < 4 || !analysisBoard.value.length) return;
+    previewActive = true;
+    window.dispatchEvent(new CustomEvent("preview-line", {
+        detail: { board: analysisBoard.value, pvs: [alt], count: 1 },
+    }));
+}
+
 </script>
 
 <template>
     <n-card title="局面分析" :bordered="false" class="textlog" content-style="color: blue">
         <n-flex justify="space-between" align="end">
-            <n-text type="info" class="analyse-title" strong>
+            <n-text type="info" class="analyse-title" strong @mouseenter="previewLine(0)" @mouseleave="restoreBoard()">
                 {{ best.side }} {{ best.move }}
             </n-text>
             <n-flex align="center" :size="6">
@@ -169,14 +181,20 @@ function restoreBoard() {
                 @mouseenter="previewLine(i)"
                 @mouseleave="restoreBoard()"
             >
-                <n-text depth="3">{{ i + 2 }}. {{ followUpSide(i) }} {{ m }}</n-text>
+                <n-text depth="3">{{ i + 1 }}. {{ followUpSide(i) }} {{ m }}</n-text>
             </div>
         </div>
         <div v-if="alternatives.length" class="alternatives">
             <n-text strong style="color: #9b59b6">次优招法</n-text>
-            <div v-for="(m, i) in alternatives" :key="i" class="alt-item">
-                <n-text depth="3">{{ i + 2 }}. {{ m }} {{ formatGap(altScores[i]) }}</n-text>
-            </div>
+                    <div
+                        v-for="(m, i) in alternatives"
+                        :key="i"
+                        class="alt-item"
+                        @mouseenter="previewAlt(i)"
+                        @mouseleave="restoreBoard()"
+                    >
+                        <n-text depth="3">{{ i + 2 }}. {{ m }} {{ formatGap(altScores[i]) }}</n-text>
+                    </div>
         </div>
     </n-card>
 </template>
@@ -205,6 +223,13 @@ function restoreBoard() {
 
 .analyse-title {
     font-size: x-large;
+    cursor: pointer;
+    border-radius: 2px;
+    padding: 0 2px;
+}
+
+.analyse-title:hover {
+    background-color: rgba(24, 160, 88, 0.15);
 }
 
 .alternatives {
@@ -216,6 +241,13 @@ function restoreBoard() {
 
 .alt-item {
     line-height: 1.5;
+    border-radius: 2px;
+    padding: 0 2px;
+    cursor: pointer;
+}
+
+.alt-item:hover {
+    background-color: rgba(24, 160, 88, 0.15);
 }
 
 .textlog {

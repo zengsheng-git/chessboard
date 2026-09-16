@@ -58,8 +58,19 @@ interface EngineConfig {
     alt_score_gap: number;
 }
 
-// 模式由父组件(App)持有, 推演等面板按模式切换显示
+// 模式由父组件(App)持有, 推演等面板按模式切换显示; 缩放同样由 App 应用到窗口
 const mode = defineModel<string>("mode", { default: "LinkAnaly" });
+const zoom = defineModel<number>("zoom", { default: 1 });
+
+const zoomOptions = [
+    { label: "60%", value: 0.6 },
+    { label: "70%", value: 0.7 },
+    { label: "80%", value: 0.8 },
+    { label: "90%", value: 0.9 },
+    { label: "100%", value: 1 },
+    { label: "110%", value: 1.1 },
+    { label: "125%", value: 1.25 },
+];
 
 const config = ref<EngineConfig>({
     depth: 0,
@@ -295,6 +306,7 @@ async function toggleEngine() {
     <n-card class="toolbar" :bordered="false" size="small">
         <n-space vertical size="small">
             <n-flex align="center" justify="space-between">
+            <n-flex align="center" :size="8">
                 <n-select
                     size="small"
                     v-model:value="mode"
@@ -303,6 +315,19 @@ async function toggleEngine() {
                     placeholder="选择模式"
                     class="mode-select"
                 />
+                <n-tooltip trigger="hover" placement="bottom">
+                    <template #trigger>
+                        <n-select
+                            size="small"
+                            v-model:value="zoom"
+                            :options="zoomOptions"
+                            :consistent-menu-width="false"
+                            class="zoom-select"
+                        />
+                    </template>
+                    界面缩放
+                </n-tooltip>
+            </n-flex>
 
                 <n-space>
                     <n-tooltip trigger="hover" placement="bottom">
@@ -445,6 +470,10 @@ async function toggleEngine() {
 
 .mode-select {
     width: 110px;
+}
+
+.zoom-select {
+    width: 88px;
 }
 
 :deep(.n-button) {

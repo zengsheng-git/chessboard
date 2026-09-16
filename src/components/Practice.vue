@@ -252,7 +252,8 @@ async function refreshHint() {
             camp: result.camp ?? camp.value,
         };
         pvs.value = result.pvs ?? [];
-        followUps.value = moves.slice(1);
+        // 主线完整着法: 第 1 条是最优招法本身, 之后为双方接下来的推演着法
+        followUps.value = moves;
         alternatives.value = result.alt_moves ?? [];
         altScores.value = result.alt_scores ?? [];
         altIccs.value = result.alternatives ?? [];
@@ -312,18 +313,18 @@ const lossText = computed(() => {
 });
 const lossType = computed(() => ((lastLoss.value ?? 0) > 30 ? "error" : "success") as "error" | "success");
 
-// 后续招法与最优招法的行棋方交替: 偶数索引是行棋方的对手, 奇数索引回到行棋方
+// 主线着法按行棋方交替: 偶数索引是最优招法的行棋方, 奇数索引是对手
 function followUpSide(index: number): string {
     const moverRed = hint.value.camp === "w";
-    const isMover = index % 2 === 1;
+    const isMover = index % 2 === 0;
     return (isMover ? moverRed : !moverRed) ? "红方" : "黑方";
 }
 
-// 悬停后续招法第 index 项: 预演主线前 index+2 步(含最优招法); 演练盘无实时事件, 直接按数据态渲染/还原
+// 悬停主线第 index 项: 预演到该步的局面(含最优招法); 演练盘无实时事件, 直接按数据态渲染/还原
 function previewLine(index: number) {
     if (!pvs.value.length) return;
     const map = { ...boardMap.value };
-    const count = Math.min(index + 2, pvs.value.length);
+    const count = Math.min(index + 1, pvs.value.length);
     for (let i = 0; i < count; i++) {
         const from = pvs.value[i].substring(0, 2);
         const to = pvs.value[i].substring(2, 4);
@@ -337,6 +338,20 @@ function previewLine(index: number) {
 
 function restoreBoard() {
     renderBoard(boardMap.value);
+}
+
+// 悬停次优招法: 预演走该备选首着后的局面
+function previewAlt(index: number) {
+    const alt = altIccs.value[index];
+    if (!alt || alt.length < 4) return;
+    const map = { ...boardMap.value };
+    const from = alt.substring(0, 2);
+    const to = alt.substring(2, 4);
+    const piece = map[from];
+    if (!piece || piece === " ") return;
+    map[from] = " ";
+    map[to] = piece;
+    renderBoard(map);
 }
 </script>
 
@@ -363,7 +378,7 @@ function restoreBoard() {
             </div>
             <template v-else>
                 <n-flex justify="space-between" align="end">
-                    <n-text type="info" class="analyse-title" strong>
+                    <n-text type="info" class="analyse-title" strong @mouseenter="previewLine(0)" @mouseleave="restoreBoard()">
                         {{ camp === "w" ? "红方" : "黑方" }} {{ hint.best }}
                     </n-text>
                     <n-flex :size="6" align="center">
@@ -384,12 +399,18 @@ function restoreBoard() {
                         @mouseenter="previewLine(i)"
                         @mouseleave="restoreBoard()"
                     >
-                        <n-text depth="3">{{ i + 2 }}. {{ followUpSide(i) }} {{ m }}</n-text>
+                        <n-text depth="3">{{ i + 1 }}. {{ followUpSide(i) }} {{ m }}</n-text>
                     </div>
                 </div>
                 <div v-if="alternatives.length" class="alternatives">
                     <n-text strong style="color: #9b59b6">次优招法</n-text>
-                    <div v-for="(m, i) in alternatives" :key="i" class="alt-item">
+                    <div
+                        v-for="(m, i) in alternatives"
+                        :key="i"
+                        class="alt-item"
+                        @mouseenter="previewAlt(i)"
+                        @mouseleave="restoreBoard()"
+                    >
                         <n-text depth="3">{{ i + 2 }}. {{ m }} {{ formatGap(altScores[i]) }}</n-text>
                     </div>
                 </div>
@@ -453,10 +474,24 @@ function restoreBoard() {
 
 .alt-item {
     line-height: 1.5;
+    border-radius: 2px;
+    padding: 0 2px;
+    cursor: pointer;
+}
+
+.alt-item:hover {
+    background-color: rgba(24, 160, 88, 0.15);
 }
 
 .analyse-title {
     font-size: x-large;
+    cursor: pointer;
+    border-radius: 2px;
+    padding: 0 2px;
+}
+
+.analyse-title:hover {
+    background-color: rgba(24, 160, 88, 0.15);
 }
 
 .practice-actions {
