@@ -50,6 +50,7 @@ struct AnalysisContext {
     expect_camp: chess::Camp,               // 上次分析的行棋方
     pending_deviation: Option<chess::Camp>, // 刚发生非预期走子的一方, 下次分析时计算代价
     invalid_change_count: usize,
+    last_hint_version: u32, // 上次分析时的提示档位版本号, 用于检测切档后立即重算
 }
 
 unsafe impl Send for AnalysisContext {}
@@ -68,6 +69,7 @@ impl AnalysisContext {
             expect_camp: chess::Camp::None,
             pending_deviation: None,
             invalid_change_count: 0,
+            last_hint_version: crate::hint_version(),
         }
     }
 
@@ -90,10 +92,17 @@ impl AnalysisContext {
     // 分析棋盘并返回结果
     fn analyze_board(&mut self, camp: &chess::Camp, board: [[char; 9]; 10]) -> Option<BoardAnalysisResult> {
         let fen = chess::board_fen(camp, board);
-        let config = SHARED_STATE.get().unwrap().config.read().unwrap();
+        // 先克隆配置再释放读锁: 搜索可能耗时数秒(云库超时+引擎),
+        // 期间不能阻塞设置界面的配置写入命令, 否则改参数/切档位会卡住
+        let engine_config = {
+            let config = SHARED_STATE.get().unwrap().config.read().unwrap();
+            config.engine
+        };
         let state = SHARED_STATE.get().unwrap();
         let mut engine = state.engine.lock().unwrap();
-        let result = block_on(engine.search(&fen, &config.engine));
+        let result = block_on(engine.search(&fen, &engine_config));
+        // 本次分析已按当前档位完成, 记录档位版本号, 避免下一拍重复重算
+        self.last_hint_version = crate::hint_version();
         result.as_ref()?;
 
         // 上一步为非预期走子时, 携带当时的预期评分用于计算偏离代价
@@ -119,6 +128,14 @@ impl AnalysisContext {
 
     // 处理移动事件
     fn handle_move(&mut self, changed: &chess::Changed) { self.app.emit("move", changed).unwrap(); }
+
+    // 按当前档位重算给定行棋方的提示并更新预期(用于切档后棋盘未变时的立即刷新)
+    fn reanalyze(&mut self, camp: &chess::Camp) {
+        if let Some(result) = self.analyze_board(camp, self.last_board) {
+            self.expect_move = result.expect_move;
+            self.expect_board = result.expect_board;
+        }
+    }
 
     // 分析指定行棋方并更新预期，返回新状态
     fn analyze_and_set_state(&mut self, turn: chess::Camp, board: [[char; 9]; 10], camp: &chess::Camp) -> ChessboardState {
@@ -221,6 +238,19 @@ pub fn analyse(app: &AppHandle, result: QueryResult, board: [[char; 9]; 10], cam
 }
 
 // 处理循环逻辑的主函数
+// 包一层捕获 panic: 线程内任何未预期错误(截图/识别/引擎异常)只终止本次监听,
+// 不让 join 方再因线程 panic 而连锁 panic 卡死界面
+fn process_analysis_loop_guarded(context: AnalysisContext) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_analysis_loop(context);
+    }));
+    if let Err(e) = result {
+        let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+            .or_else(|| e.downcast_ref::<&str>().copied())
+            .unwrap_or("未知错误");
+        error!("分析线程异常退出: {}", msg);
+    }
+}
 fn process_analysis_loop(mut context: AnalysisContext) {
     let mut current_state = ChessboardState::Initial;
     let mut capture_failures = 0usize;
@@ -321,7 +351,13 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                 } else if chess::Camp::Red.eq(&camp) {
                     // 仍然是初始棋盘，且我方先手
                     if context.last_board == board {
-                        // 防止重复分析
+                        // 防止重复分析; 但档位已切换时按新档位重算开局提示
+                        let version = crate::hint_version();
+                        if version != context.last_hint_version {
+                            context.last_hint_version = version;
+                            info!("提示档位已切换, 按新档位重算当前局面");
+                            context.reanalyze(&camp);
+                        }
                         ChessboardState::StartPos
                     } else {
                         // 设置前端棋盘
@@ -348,7 +384,15 @@ fn process_analysis_loop(mut context: AnalysisContext) {
             ChessboardState::OurTurn | ChessboardState::OpponentTurn => {
                 // 判断棋盘是否未发生变化
                 if board == context.last_board {
-                    debug!("棋盘未发生变化，跳过分析");
+                    // 棋盘未变但档位已切换: 立即按新档位重算当前局面提示
+                    let version = crate::hint_version();
+                    if version != context.last_hint_version {
+                        context.last_hint_version = version;
+                        info!("提示档位已切换, 按新档位重算当前局面");
+                        context.reanalyze(&camp);
+                    } else {
+                        debug!("棋盘未发生变化，跳过分析");
+                    }
                     current_state // 保持当前状态
                 } else if board == context.expect_board {
                     // 符合预期棋盘，分析下一行动方
@@ -404,43 +448,48 @@ fn process_analysis_loop(mut context: AnalysisContext) {
 #[tauri::command]
 pub async fn start_listen(app: AppHandle, target: Window) -> Result<(), String> {
     trace!("start_listen");
-    if SHARED_STATE.get().unwrap().listen_thread.try_lock().is_err() {
-        error!("current listen thread is running, please stop it first");
-        return Err("已经在监听中".to_string());
-    }
-
-    // 初始化监听窗口模块
-    let Some(mut window) = ListenWindow::new(&target, IMAGE_WIDTH, IMAGE_HEIGHT) else {
-        return Err("目标窗口不存在".to_string());
-    };
-    let Some(image) = window.capture() else {
-        return Err("无法截取目标窗口画面".to_string());
-    };
-
-    let image_h = image.height();
-    let image_w = image.width();
-
-    let detections = predict(image).unwrap();
-
-    match common::detections_bound(image_w, image_h, &detections) {
-        Ok((x, y, w, h)) => {
-            window.set_sub_bound(x, y, w, h); // 设置窗口边界
+    {
+        // 先检查再占用, 整个过程持锁防止并发双开
+        let shared_state = SHARED_STATE.get().unwrap();
+        let mut listen_slot = shared_state.listen_thread.lock().unwrap();
+        if listen_slot.is_some() {
+            error!("current listen thread is running, please stop it first");
+            return Err("已经在监听中".to_string());
         }
-        Err(e) => {
-            return Err(e); // 未识别到棋盘
+
+        // 初始化监听窗口模块
+        let Some(mut window) = ListenWindow::new(&target, IMAGE_WIDTH, IMAGE_HEIGHT) else {
+            return Err("目标窗口不存在".to_string());
+        };
+        let Some(image) = window.capture() else {
+            return Err("无法截取目标窗口画面".to_string());
+        };
+
+        let image_h = image.height();
+        let image_w = image.width();
+
+        let detections = predict(image).unwrap();
+
+        match common::detections_bound(image_w, image_h, &detections) {
+            Ok((x, y, w, h)) => {
+                window.set_sub_bound(x, y, w, h); // 设置窗口边界
+            }
+            Err(e) => {
+                return Err(e); // 未识别到棋盘
+            }
         }
+
+        // 创建分析上下文
+        let context = AnalysisContext::new(app.clone(), window);
+
+        // 启动后台线程进行截图和处理
+        let listen_thread = thread::spawn(move || {
+            trace!("into thread");
+            process_analysis_loop_guarded(context);
+        });
+
+        *listen_slot = Some(listen_thread);
     }
-
-    // 创建分析上下文
-    let context = AnalysisContext::new(app.clone(), window);
-
-    // 启动后台线程进行截图和处理
-    let listen_thread = thread::spawn(move || {
-        trace!("into thread");
-        process_analysis_loop(context);
-    });
-
-    SHARED_STATE.get().unwrap().listen_thread.lock().unwrap().replace(listen_thread);
 
     Ok(())
 }
@@ -450,11 +499,18 @@ pub fn stop_listen() {
     info!("stop listen");
     let shared_state = SHARED_STATE.get().unwrap();
     if let Ok(mut state) = shared_state.listen_thread.lock()
-        && let Some(listen_thread) = state.take() {
-            // 释放锁，停止后台线程
-            debug!("释放锁，停止后台线程");
-            drop(state);
-            listen_thread.join().unwrap();
-        }
+        && let Some(listen_thread) = state.take()
+    {
+        // 释放锁，停止后台线程
+        debug!("释放锁，停止后台线程");
+        drop(state);
+        // join 移到独立线程: 后台线程最多在下一个循环检查点退出(通常数百毫秒),
+        // 但停止命令必须立即返回, 保证界面永不因停止操作而冻结
+        thread::spawn(move || {
+            if let Err(e) = listen_thread.join() {
+                error!("等待监听线程退出失败: {:?}", e);
+            }
+        });
+    }
     debug!("stoped");
 }

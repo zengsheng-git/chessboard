@@ -157,6 +157,17 @@ pub async fn set_engine_alt_score_gap(gap: isize) {
 }
 
 #[tauri::command]
+pub async fn set_engine_hint_level(level: i32) {
+    let state = SHARED_STATE.get().unwrap();
+    let mut config = state.config.write().unwrap();
+    config.engine.hint_level = level.clamp(0, 5);
+    config.save();
+    debug!("set_engine_hint_level: {}", level);
+    // 递增版本号通知监听线程: 即使棋盘未变也按新档位重算当前局面
+    crate::bump_hint_version();
+}
+
+#[tauri::command]
 pub async fn set_chessdb(enabled: bool, timeout: Option<u64>) {
     let state = SHARED_STATE.get().unwrap();
     let mut config = state.config.write().unwrap();

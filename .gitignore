@@ -33,3 +33,4 @@ __pycache__
 !pikafish-windows.exe
 !libs/large.onnx
 !libs/windows-cpu/*.dll
+libs/windows-gpu/

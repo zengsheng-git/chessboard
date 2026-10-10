@@ -56,6 +56,7 @@ interface EngineConfig {
     chessdb_enabled: boolean;
     chessdb_timeout: number;
     alt_score_gap: number;
+    hint_level: number;
 }
 
 // 模式由父组件(App)持有, 推演等面板按模式切换显示; 缩放同样由 App 应用到窗口
@@ -72,6 +73,21 @@ const zoomOptions = [
     { label: "125%", value: 1.25 },
 ];
 
+// 提示强度档位映射到固定搜索深度: 每一手都出自同样的浅思考, 整体一致地弱(而非强引擎概率放水)
+// 0=不限棋力(跟随深度/时间设置并优先云库); 档位标注为自对弈实测校准的约等于天天象棋水平
+const hintOptions = [
+    { label: "最强(不限)", value: 0 },
+    { label: "新手(深度2·约业2-3)", value: 1 },
+    { label: "入门(深度4·约业4-5)", value: 2 },
+    { label: "初级(深度6·约业5-6)", value: 3 },
+    { label: "中级(深度8·约业7-8)", value: 4 },
+    { label: "高级(深度12·约业9+)", value: 5 },
+];
+const hintLevel = computed({
+    get: () => hintOptions.find((o) => o.value === config.value.hint_level)?.value ?? config.value.hint_level,
+    set: (v: number) => (config.value.hint_level = v),
+});
+
 const config = ref<EngineConfig>({
     depth: 0,
     time: 0,
@@ -82,6 +98,7 @@ const config = ref<EngineConfig>({
     chessdb_enabled: false,
     chessdb_timeout: 0,
     alt_score_gap: 0,
+    hint_level: 0,
 });
 
 const showEngineConfig = ref(false);
@@ -282,6 +299,10 @@ async function setEngineAltScoreGap() {
     await invoke("set_engine_alt_score_gap", { gap: config.value.alt_score_gap });
 }
 
+async function setEngineHintLevel() {
+    await invoke("set_engine_hint_level", { level: config.value.hint_level });
+}
+
 async function setChessdb() {
     await invoke("set_chessdb", {
         enabled: config.value.chessdb_enabled,
@@ -375,6 +396,15 @@ async function toggleEngine() {
         <n-drawer v-model:show="showEngineConfig" :width="300" placement="right">
             <n-drawer-content title="引擎配置">
                 <n-form :model="config" label-placement="left" label-width="80">
+                    <n-form-item label="提示强度">
+                        <n-select
+                            v-model:value="hintLevel"
+                            :options="hintOptions"
+                            :consistent-menu-width="false"
+                            style="width: 220px"
+                            @update:value="setEngineHintLevel"
+                        />
+                    </n-form-item>
                     <n-form-item label="深度">
                         <n-input-number
                             v-model:value="config.depth"

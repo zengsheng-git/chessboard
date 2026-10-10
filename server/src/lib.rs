@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -27,6 +28,18 @@ struct SharedState {
 
 static SHARED_STATE: OnceLock<SharedState> = OnceLock::new();
 
+// 提示档位版本号: set_engine_hint_level 每次切换时递增, 监听线程比对发现变化后
+// 即使棋盘未变也立即按新档位重算当前局面提示(否则旧提示一直挂到下一次走子)
+static HINT_LEVEL_VERSION: AtomicU32 = AtomicU32::new(0);
+
+pub fn bump_hint_version() {
+    HINT_LEVEL_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn hint_version() -> u32 {
+    HINT_LEVEL_VERSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -36,16 +49,18 @@ pub fn run() {
             let _ = SHARED_STATE.get_or_init(|| {
                 let config = config::Config::load(&app.path().config_dir().unwrap());
                 let lib_path = app.path().resolve("../libs/pikafish", tauri::path::BaseDirectory::Resource).unwrap();
-                let (child, stdin, stop_stdin) = engine::command::new(&lib_path);
-                let mut engine = engine::Engine::from_child(child, stdin, &lib_path);
-                engine.set_show_wdl(config.engine.show_wdl);
-                engine.set_hash(config.engine.hash);
-                engine.set_threads(config.engine.threads);
-                practice::set_stop_writer(stop_stdin);
+                let engine = Arc::new(Mutex::new(engine::Engine::new(&lib_path)
+                    .unwrap_or_else(|e| panic!("引擎启动失败: {e}"))));
+                {
+                    let mut eng = engine.lock().unwrap();
+                    eng.set_show_wdl(config.engine.show_wdl);
+                    eng.set_hash(config.engine.hash);
+                    eng.set_threads(config.engine.threads);
+                }
 
                 SharedState {
                     config: Arc::new(RwLock::new(config)),
-                    engine: Arc::new(Mutex::new(engine)),
+                    engine,
                     listen_thread: Mutex::new(None),
                 }
             });
@@ -66,6 +81,7 @@ pub fn run() {
             config::set_engine_show_wdl,
             config::set_engine_multipv,
             config::set_engine_alt_score_gap,
+            config::set_engine_hint_level,
             config::set_chessdb,
             practice::practice_start,
             practice::practice_moves,
@@ -84,6 +100,5 @@ fn reload_engine(app: tauri::AppHandle) {
     let state = SHARED_STATE.get().unwrap();
     let engine_config = state.config.read().unwrap().engine;
     let mut engine = state.engine.lock().unwrap();
-    let stop_stdin = engine.reload(&lib_path, &engine_config);
-    practice::set_stop_writer(stop_stdin);
+    engine.reload(&lib_path, &engine_config);
 }

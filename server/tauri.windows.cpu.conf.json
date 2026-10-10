@@ -1,7 +1,7 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
-    "productName": "xqlink-dev",
-    "version": "0.1.2",
+    "productName": "xqlink-dev2",
+    "version": "0.1.6",
     "identifier": "top.itmeng.xqlinkdev",
     "build": {
         "beforeDevCommand": "pnpm dev",
@@ -13,7 +13,7 @@
     "app": {
         "windows": [
             {
-                "title": "中国象棋dev",
+                "title": "中国象棋dev2",
                 "width": 660,
                 "height": 580,
                 "resizable": false,

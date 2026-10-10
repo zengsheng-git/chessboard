@@ -1,5 +1,3 @@
-use std::io::Write;
-use std::process::ChildStdin;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -7,27 +5,12 @@ use tauri::async_runtime::block_on;
 
 use crate::attack;
 use crate::chess::{self, Camp, Position};
+use crate::engine::interrupt_search;
 use crate::engine::QueryResult;
 use crate::worker::prepare_result;
 use crate::SHARED_STATE;
 
 pub type Board = [[char; 9]; 10];
-
-static STOP_WRITER: Mutex<Option<ChildStdin>> = Mutex::new(None);
-
-// 保存引擎 stdin 克隆, 在引擎思考中走子时可不加锁发送 stop 中断搜索
-pub fn set_stop_writer(writer: Option<ChildStdin>) {
-    *STOP_WRITER.lock().unwrap() = writer;
-}
-
-fn interrupt_search() {
-    if let Ok(mut writer) = STOP_WRITER.lock()
-        && let Some(w) = writer.as_mut()
-    {
-        let _ = w.write_all(b"stop\n");
-        let _ = w.flush();
-    }
-}
 
 // 演练会话: 保存起始局面与已走着法, 当前局面按着法重放推导
 pub struct PracticeSession {
