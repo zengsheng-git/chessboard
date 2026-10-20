@@ -3,7 +3,9 @@ import { listen } from '@tauri-apps/api/event';
 import { NCard, NFlex, NTag, NText } from 'naive-ui';
 import { computed, ref } from 'vue';
 
+import type { ArrowHint } from '../arrows';
 import { evalText, formatGap, winrateText as formatWinrate } from '../format';
+import { mirrorStore } from '../store';
 
 interface Analyse {
     depth: number,   // 深度
@@ -73,21 +75,18 @@ listen('analyse', async (event) => {
     best.value.evalText = evalResult.text;
     best.value.evalType = evalResult.type;
 
-    // 设置选择框：我方用 b-select（红色），对手用 r-select（蓝色）
-    const selectClass = isMine ? "b-select" : "r-select";
-    let pv = data.pvs[0];
-    let from = pv.substring(0, 2);
-    let to = pv.substring(2, 4)
-    document.getElementById(from)?.classList.add(selectClass);
-    document.getElementById(to)?.classList.add(selectClass);
-
-    // 次优候选着法：起点与落点都标记
+    // 招法提示箭头: 最优招法按行棋方着色(我方红/对方蓝), 次优为紫色细箭头
+    const arrows: ArrowHint[] = [];
+    const pv = data.pvs[0];
+    if (pv && pv.length >= 4) {
+        arrows.push({ from: pv.substring(0, 2), to: pv.substring(2, 4), kind: isMine ? "red" : "blue" });
+    }
     for (const alt of data.alternatives ?? []) {
         if (alt.length >= 4) {
-            document.getElementById(alt.substring(0, 2))?.classList.add("alt-select");
-            document.getElementById(alt.substring(2, 4))?.classList.add("alt-select");
+            arrows.push({ from: alt.substring(0, 2), to: alt.substring(2, 4), kind: "alt" });
         }
     }
+    mirrorStore.arrows = arrows;
 })
 
 
