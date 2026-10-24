@@ -12,6 +12,7 @@ use tracing::warn;
 use xcap::image::ImageBuffer;
 use xcap::image::Rgba;
 
+use crate::attack;
 use crate::chess;
 use crate::common;
 use crate::engine::DeviationCost;
@@ -27,6 +28,16 @@ use crate::SHARED_STATE;
 struct BoardAnalysisResult {
     expect_move: chess::Changed,
     expect_board: [[char; 9]; 10],
+}
+
+// 真实对局棋谱的一步: 该步之后的局面 + 中文记谱, 供局势推演从任意一步开局
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct GameStep {
+    pub camp: char,                       // 该局面当前行棋方 'w'/'b'
+    pub notation: String,                 // 该步中文记谱(起始局面为空串)
+    pub mover: char,                      // 走子方 'w'/'b'(起始局面为 '\0')
+    pub mv: String,                       // 该步 iccs 着法(如 "h2e2", 起始局面为空串)
+    pub board: Vec<chess::Position>,      // 该步之后的局面
 }
 
 // 定义不同的棋盘状态
@@ -51,6 +62,9 @@ struct AnalysisContext {
     pending_deviation: Option<chess::Camp>, // 刚发生非预期走子的一方, 下次分析时计算代价
     invalid_change_count: usize,
     last_hint_version: u32, // 上次分析时的提示档位版本号, 用于检测切档后立即重算
+    game: Vec<GameStep>,    // 真实对局棋谱(第 0 项为起始局面), 每步走子后追加并整体推给前端
+    recorded_board: [[char; 9]; 10], // 最后一次记入棋谱的局面; 只在记谱/重建时更新, 不被跟踪抖动污染
+    pending_board: Option<[[char; 9]; 10]>, // Initial 重建前的待确认局面(连续两拍一致才重建, 过滤抖动帧)
 }
 
 unsafe impl Send for AnalysisContext {}
@@ -70,6 +84,9 @@ impl AnalysisContext {
             pending_deviation: None,
             invalid_change_count: 0,
             last_hint_version: crate::hint_version(),
+            game: Vec::new(),
+            recorded_board: [[' '; 9]; 10],
+            pending_board: None,
         }
     }
 
@@ -129,6 +146,116 @@ impl AnalysisContext {
     // 处理移动事件
     fn handle_move(&mut self, changed: &chess::Changed) { self.app.emit("move", changed).unwrap(); }
 
+    // 棋谱重建判定: 仅在首次识别(棋谱为空)或检测到新对局(回到初始布局)时重建;
+    // 对局中跟踪恢复(拾子帧/漏拍/盘面跳变)保留已有棋谱, 避免整盘记录被清空
+    fn should_rebuild_game(game_len: usize, board: [[char; 9]; 10]) -> bool {
+        game_len == 0 || chess::startpos(board)
+    }
+
+    // 以当前局面为起点重建棋谱并整体推给前端; 对局中恢复时保留已有棋谱只续记
+    fn reset_game(&mut self, turn: &chess::Camp, board: [[char; 9]; 10]) {
+        if !Self::should_rebuild_game(self.game.len(), board) {
+            // 断档续记: 中间未记录的走子已无法回溯, 接受跳步并把记谱基准同步到当前局面,
+            // 否则基准永远落后, 后续所有走子都会被断档守卫拦下, 棋谱卡死
+            info!("对局跟踪恢复, 保留已有棋谱(已记 {} 步), 基准同步到当前局面, 断档续记", self.game.len() - 1);
+            self.recorded_board = board;
+            return;
+        }
+        if !self.game.is_empty() {
+            info!("检测到新对局(回到初始布局), 对局棋谱重新开始");
+        }
+        self.game.clear();
+        self.game.push(GameStep {
+            camp: turn.to_char(),
+            notation: String::new(),
+            mover: '\0',
+            mv: String::new(),
+            board: chess::board_map(board),
+        });
+        self.recorded_board = board;
+        let _ = self.app.emit("game_history", &self.game);
+    }
+
+    // 记录真实对局一步: 以 recorded_board(上次记谱局面)为基准算中文记谱并推进记录
+    fn record_game_step(&mut self, changed: &chess::Changed, board: [[char; 9]; 10]) {
+        let mv = format!("{}{}", changed.from, changed.to);
+        let notation = chess::board_move_chinese(self.recorded_board, &mv);
+        info!("对局记录: {} ({})", notation, mv);
+        self.game.push(GameStep {
+            camp: changed.camp.opposite().to_char(),
+            notation,
+            mover: changed.camp.to_char(),
+            mv: mv.clone(),
+            board: chess::board_map(board),
+        });
+        self.recorded_board = board;
+        let _ = self.app.emit("game_history", &self.game);
+    }
+
+    // 多步桥接尝试: 捕获间隔(截图+识别约 1 秒)内双方连走多步时, diff 会看到多格变化(Unknown),
+    // 在合法着法空间内搜索 记谱基准→当前局面 的着法序列并逐步补记谱;
+    // 能衔接则回到正常跟踪并分析新局面, 无法衔接返回 None 走原重建/稳定流程
+    fn try_bridge(&mut self, board: [[char; 9]; 10], camp: &chess::Camp) -> Option<ChessboardState> {
+        // 桥接的行棋起点 = 棋谱最后一项的行棋方(该项 camp 即走子后轮到的一方)
+        let side = match self.game.last().map(|s| s.camp).unwrap_or('\0') {
+            'w' => chess::Camp::Red,
+            'b' => chess::Camp::Black,
+            _ => return None,
+        };
+        let Some(path) = Self::bridge_moves(self.recorded_board, board, side) else {
+            return None;
+        };
+        info!("跟踪恢复: 桥接连续 {} 步(捕获间隔内连走), 完整记谱", path.len());
+        let mut cur = self.recorded_board;
+        let mut mover = chess::Camp::None;
+        for changed in &path {
+            cur = chess::board_move(cur, &format!("{}{}", changed.from, changed.to));
+            mover = changed.camp.clone();
+            self.record_game_step(changed, cur);
+        }
+        self.last_board = board;
+        self.update_ui(camp, board);
+        Some(self.analyze_and_set_state(mover.opposite(), board, camp))
+    }
+
+    // 在合法着法空间内搜索 from→to 的连续着法序列(每步恰改 2 格, 深度按差异格数收敛, 上限 3 步)
+    fn bridge_moves(from: [[char; 9]; 10], to: [[char; 9]; 10], side: chess::Camp) -> Option<Vec<chess::Changed>> {
+        let mut cells = 0;
+        for y in 0..10 {
+            for x in 0..9 {
+                if from[y][x] != to[y][x] {
+                    cells += 1;
+                }
+            }
+        }
+        if cells == 0 || cells % 2 != 0 {
+            return None;
+        }
+        let mut path = Vec::new();
+        if Self::bridge_dfs(from, to, side, (cells / 2).min(3), &mut path) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    fn bridge_dfs(
+        board: [[char; 9]; 10], to: [[char; 9]; 10], side: chess::Camp, depth: usize, path: &mut Vec<chess::Changed>,
+    ) -> bool {
+        for mv in attack::legal_moves(&board, &side) {
+            let next = chess::board_move(board, &mv);
+            if next == to {
+                path.push(chess::Changed::from_pv(&mv, board));
+                return true;
+            }
+            if depth > 1 && Self::bridge_dfs(next, to, side.opposite(), depth - 1, path) {
+                path.insert(0, chess::Changed::from_pv(&mv, board));
+                return true;
+            }
+        }
+        false
+    }
+
     // 按当前档位重算给定行棋方的提示并更新预期(用于切档后棋盘未变时的立即刷新)
     fn reanalyze(&mut self, camp: &chess::Camp) {
         if let Some(result) = self.analyze_board(camp, self.last_board) {
@@ -152,6 +279,17 @@ impl AnalysisContext {
 
     // 处理一次走棋：更新UI、分析下一行动方并返回新状态
     fn handle_move_and_next(&mut self, changed: &chess::Changed, board: [[char; 9]; 10], camp: &chess::Camp) -> ChessboardState {
+        // 仅当跟踪基准与记谱基准一致(连续跟踪)时记谱, 否则说明中间有断档, 本步跳过记录
+        if self.last_board == self.recorded_board {
+            self.record_game_step(changed, board);
+        } else {
+            debug!("局面基准与棋谱断档, 本步跳过记录");
+        }
+        self.advance(changed, board, camp)
+    }
+
+    // 记谱后推进: 更新基准与UI、分析下一行动方(恢复补记与正常走子共用)
+    fn advance(&mut self, changed: &chess::Changed, board: [[char; 9]; 10], camp: &chess::Camp) -> ChessboardState {
         self.last_board = board;
         self.handle_move(changed);
         // 本步为非预期走子(与引擎预测不符), 下次分析时计算偏离代价
@@ -290,36 +428,91 @@ fn process_analysis_loop(mut context: AnalysisContext) {
         // 根据不同状态处理棋盘
         current_state = match current_state {
             ChessboardState::Initial => {
-                // 初始状态，做第一次分析
-                debug!("首次启动，立即分析");
-
-                // 设置前端棋盘
-                context.update_ui(&camp, board);
-
-                // 确定初始局面轮到谁：初始棋盘红方先手，否则按玩家阵营近似
-                let turn = if chess::startpos(board) {
-                    chess::Camp::Red
-                } else if camp.eq(&chess::Camp::Red) {
-                    chess::Camp::Red
+                // 识别局面无效(缺子/多子): 不分析不重建, 快速等下一拍, 避免把抖动帧当基准
+                if !chess::board_check(board) {
+                    debug!("识别局面无效, 等待识别稳定");
+                    ChessboardState::Invalid
                 } else {
-                    chess::Camp::Black
-                };
-
-                // 分析当前行棋方
-                if let Some(result) = context.analyze_board(&turn, board) {
-                    context.expect_move = result.expect_move;
-                    context.expect_board = result.expect_board;
+                // 中途恢复跟踪(拾子帧/漏拍/抖动后回到 Initial): 以棋谱基准衔接, 而非直接重置
+                let mut recovered: Option<ChessboardState> = None;
+                if !context.game.is_empty() {
+                    if board == context.recorded_board {
+                        // 抖动幻影消失后盘面与记谱基准一致: 回退跟踪, 不做无谓重分析
+                        context.pending_board = None;
+                        context.last_board = board;
+                        recovered = Some(ChessboardState::OurTurn);
+                    } else {
+                        let (changed, diff_state) = chess::board_diff(context.recorded_board, board);
+                        match diff_state {
+                            // 恰好比记谱基准多一步(拾子帧 One→Invalid→Initial 后走子完成): 补记衔接
+                            chess::BoardChangeState::Move => {
+                                info!("跟踪恢复: 与棋谱基准衔接一步");
+                                context.pending_board = None;
+                                context.record_game_step(&changed, board);
+                                recovered = Some(context.advance(&changed, board, &camp));
+                            }
+                            // 仍只差一格(拾子帧/瞬时误检): 基准回退到记谱局面, 等走子完成
+                            chess::BoardChangeState::One => {
+                                debug!("跟踪恢复: 单格变化, 等待走子完成");
+                                context.pending_board = None;
+                                context.last_board = context.recorded_board;
+                                recovered = Some(ChessboardState::OurTurn);
+                            }
+                            // 多格变化: 先尝试桥接补记(捕获间隔内连走多步), 无法桥接才走稳定确认
+                            _ => {
+                                if let Some(next) = context.try_bridge(board, &camp) {
+                                    context.pending_board = None;
+                                    recovered = Some(next);
+                                } else if context.pending_board == Some(board) {
+                                    context.pending_board = None;
+                                    info!("局面跳变已稳定, 以当前局面重建基准(断档续记)");
+                                } else {
+                                    context.pending_board = Some(board);
+                                    debug!("局面跳变待稳定, 暂缓重建");
+                                    recovered = Some(ChessboardState::Initial);
+                                }
+                            }
+                        }
+                    }
                 }
-
-                context.last_board = board;
-
-                // 如果是初始棋盘，进入初始状态，否则进入一般状态
-                if chess::startpos(board) {
-                    ChessboardState::StartPos
-                } else if turn.eq(&camp) {
-                    ChessboardState::OurTurn
+                if let Some(next) = recovered {
+                    next
                 } else {
-                    ChessboardState::OpponentTurn
+                    // 初始状态，做第一次分析
+                    debug!("首次启动，立即分析");
+
+                    // 设置前端棋盘
+                    context.update_ui(&camp, board);
+
+                    // 确定初始局面轮到谁：初始棋盘红方先手，否则按玩家阵营近似
+                    let turn = if chess::startpos(board) {
+                        chess::Camp::Red
+                    } else if camp.eq(&chess::Camp::Red) {
+                        chess::Camp::Red
+                    } else {
+                        chess::Camp::Black
+                    };
+
+                    // 重建对局棋谱(仅首次识别或新对局时清空; 对局中恢复保留已有棋谱)
+                    context.reset_game(&turn, board);
+
+                    // 分析当前行棋方
+                    if let Some(result) = context.analyze_board(&turn, board) {
+                        context.expect_move = result.expect_move;
+                        context.expect_board = result.expect_board;
+                    }
+
+                    context.last_board = board;
+
+                    // 如果是初始棋盘，进入初始状态，否则进入一般状态
+                    if chess::startpos(board) {
+                        ChessboardState::StartPos
+                    } else if turn.eq(&camp) {
+                        ChessboardState::OurTurn
+                    } else {
+                        ChessboardState::OpponentTurn
+                    }
+                }
                 }
             }
 
@@ -341,10 +534,18 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                                 context.handle_invalid_change(context.last_board, board, &camp)
                             }
                             chess::BoardChangeState::Unknown => {
-                                debug!("棋局变化未知，重置上下文");
-                                context.update_ui(&camp, board);
-                                context.last_board = board;
-                                ChessboardState::Initial
+                                // 多格变化: 无效局面(识别抖动)就地等待, 有效局面才重置跟踪基准
+                                if !chess::board_check(board) {
+                                    debug!("棋局变化未知且局面无效, 等待识别稳定");
+                                    current_state
+                                } else if let Some(next) = context.try_bridge(board, &camp) {
+                                    next
+                                } else {
+                                    debug!("棋局变化未知，重置上下文");
+                                    context.update_ui(&camp, board);
+                                    context.last_board = board;
+                                    ChessboardState::Initial
+                                }
                             }
                         }
                     }
@@ -399,6 +600,12 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                     debug!("棋盘为预期棋盘，分析下一行动方");
                     let expect_move = context.expect_move.clone();
                     let expect_board = context.expect_board;
+                    // 预测招法兑现也是真实对局的一步, 记入棋谱(基准断档时跳过记录)
+                    if context.last_board == context.recorded_board {
+                        context.record_game_step(&expect_move, expect_board);
+                    } else {
+                        debug!("预期兑现但基准断档, 本步跳过记录");
+                    }
                     context.last_board = expect_board;
                     context.handle_move(&expect_move);
                     context.analyze_and_set_state(expect_move.camp.opposite(), expect_board, &camp)
@@ -426,10 +633,18 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                                 context.handle_invalid_change(context.last_board, board, &camp)
                             }
                             chess::BoardChangeState::Unknown => {
-                                debug!("棋局变化未知，重置上下文");
-                                context.update_ui(&camp, board);
-                                context.last_board = board;
-                                ChessboardState::Initial
+                                // 多格变化: 无效局面(识别抖动)就地等待; 有效局面先尝试桥接补记
+                                if !chess::board_check(board) {
+                                    debug!("棋局变化未知且局面无效, 等待识别稳定");
+                                    current_state
+                                } else if let Some(next) = context.try_bridge(board, &camp) {
+                                    next
+                                } else {
+                                    debug!("棋局变化未知，重置上下文");
+                                    context.update_ui(&camp, board);
+                                    context.last_board = board;
+                                    ChessboardState::Initial
+                                }
                             }
                         }
                     }
@@ -513,4 +728,69 @@ pub fn stop_listen() {
         });
     }
     debug!("stoped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start_board() -> [[char; 9]; 10] {
+        [
+            ['r', 'n', 'b', 'a', 'k', 'a', 'b', 'n', 'r'],
+            [' '; 9],
+            [' ', 'c', ' ', ' ', ' ', ' ', ' ', 'c', ' '],
+            ['p', ' ', 'p', ' ', 'p', ' ', 'p', ' ', 'p'],
+            [' '; 9],
+            [' '; 9],
+            ['P', ' ', 'P', ' ', 'P', ' ', 'P', ' ', 'P'],
+            [' ', 'C', ' ', ' ', ' ', ' ', ' ', 'C', ' '],
+            [' '; 9],
+            ['R', 'N', 'B', 'A', 'K', 'A', 'B', 'N', 'R'],
+        ]
+    }
+
+    fn mid_board() -> [[char; 9]; 10] {
+        let mut board = [[' '; 9]; 10];
+        board[9][4] = 'K';
+        board[0][3] = 'k';
+        board
+    }
+
+    #[test]
+    fn test_should_rebuild_game() {
+        // 首次识别(棋谱为空): 总是重建
+        assert!(AnalysisContext::should_rebuild_game(0, start_board()));
+        assert!(AnalysisContext::should_rebuild_game(0, mid_board()));
+        // 对局中跟踪恢复(非初始布局): 保留已有棋谱, 不清空
+        assert!(!AnalysisContext::should_rebuild_game(3, mid_board()));
+        // 检测到新对局(回到初始布局): 重建
+        assert!(AnalysisContext::should_rebuild_game(3, start_board()));
+    }
+
+    #[test]
+    fn test_bridge_moves() {
+        // 单步桥接: 红马 b0c2
+        let b1 = chess::board_move(start_board(), "b0c2");
+        let path = AnalysisContext::bridge_moves(start_board(), b1, chess::Camp::Red).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].from, "b0");
+        assert_eq!(path[0].to, "c2");
+        assert_eq!(path[0].camp, chess::Camp::Red);
+        // 两步桥接: 红马 b0c2 + 黑车 a9a8(捕获间隔内连走一轮)
+        let b2 = chess::board_move(b1, "a9a8");
+        let path = AnalysisContext::bridge_moves(start_board(), b2, chess::Camp::Red).unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].to, "c2");
+        assert_eq!(path[1].to, "a8");
+        assert_eq!(path[1].camp, chess::Camp::Black);
+        // 奇数格差异无法桥接
+        let mut b3 = b2;
+        b3[8][4] = 'C';
+        assert!(AnalysisContext::bridge_moves(b2, b3, chess::Camp::Red).is_none());
+        // 偶数格但不可达(黑车凭空变红兵+黑马消失)无法桥接
+        let mut b4 = b2;
+        b4[0][8] = 'P';
+        b4[0][7] = ' ';
+        assert!(AnalysisContext::bridge_moves(b2, b4, chess::Camp::Red).is_none());
+    }
 }

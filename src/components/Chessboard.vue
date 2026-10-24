@@ -3,8 +3,9 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { computed, onMounted, ref } from "vue";
 
-import { computeArrows } from "../arrows";
+import { computeArrows, cellRect } from "../arrows";
 import { mirrorStore } from "../store";
+import type { GameStep } from "../store";
 import "../assets/css/chessboard.css";
 
 
@@ -69,6 +70,21 @@ for (let y = 9; y >= 0; y--) {
 
 // 招法提示箭头(优选/次优), 由分析面板写入 store, 视角翻转时随镜像重排自动重算
 const arrowShapes = computed(() => computeArrows(mirrorStore.arrows, mirrorStore.mirror));
+
+// 最新真实走子的起讫格方框标注(绿色框, 起点细落点粗; 不用箭头以免与提示箭头混淆),
+// 视角翻转时随镜像重排自动重算
+const moveBoxes = computed(() => {
+    const steps = mirrorStore.gameSteps;
+    const last = steps[steps.length - 1];
+    if (!last || last.mv.length < 4) return [];
+    const from = cellRect(last.mv.substring(0, 2), mirrorStore.mirror);
+    const to = cellRect(last.mv.substring(2, 4), mirrorStore.mirror);
+    if (!from || !to) return [];
+    return [
+        { ...from, color: "#18a058", width: 2.5 },
+        { ...to, color: "#18a058", width: 3.5 },
+    ];
+});
 
 function clearHighlights() {
     // 走子/局面重同步后旧提示箭头已失效, 直接清空
@@ -178,6 +194,11 @@ listen('analyse', async (event) => {
     applyPosition(data.board);
 });
 
+// 真实对局棋谱: 每步走子后整体推送, 供局势推演从任意一步的局面开局
+listen('game_history', async (event) => {
+    mirrorStore.gameSteps = event.payload as GameStep[];
+});
+
 </script>
 
 <template>
@@ -185,6 +206,9 @@ listen('analyse', async (event) => {
         <div v-for="(item, _) in wrappedItems" :key="item.id" :id="item.id" class="piece-wrap"><span
                 class="piece"></span></div>
         <svg class="hint-arrows" viewBox="0 0 380 420">
+            <!-- 最新走子的起讫格方框(先画, 箭头保持最上层) -->
+            <rect v-for="(b, i) in moveBoxes" :key="'b' + i" :x="b.x + 2" :y="b.y + 2" :width="b.size - 4"
+                :height="b.size - 4" rx="4" fill="none" :stroke="b.color" :stroke-width="b.width" />
             <!-- 先画全部箭杆再画全部箭头, 箭头交叉时保持头部在最上层 -->
             <line v-for="(a, i) in arrowShapes" :key="i" :x1="a.x1" :y1="a.y1" :x2="a.x2" :y2="a.y2" :stroke="a.color"
                 :stroke-width="a.width" stroke-linecap="round" />

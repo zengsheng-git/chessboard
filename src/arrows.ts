@@ -38,6 +38,13 @@ function center(id: string, mirror: boolean): { x: number; y: number } | null {
     return { x: PAD + col * CELL + CELL / 2, y: PAD + row * CELL + CELL / 2 };
 }
 
+// 坐标 -> 格子外框(左上角 + 边长), 供着法起讫格的方框标注使用
+export function cellRect(id: string, mirror: boolean): { x: number; y: number; size: number } | null {
+    const c = center(id, mirror);
+    if (!c) return null;
+    return { x: c.x - CELL / 2, y: c.y - CELL / 2, size: CELL };
+}
+
 export function computeArrows(hints: ArrowHint[], mirror: boolean): ArrowShape[] {
     const shapes: ArrowShape[] = [];
     for (const hint of hints) {

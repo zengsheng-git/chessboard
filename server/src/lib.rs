@@ -88,6 +88,7 @@ pub fn run() {
             practice::practice_do_move,
             practice::practice_undo,
             practice::practice_reset,
+            practice::practice_goto,
             practice::practice_analyze,
         ])
         .run(tauri::generate_context!())
