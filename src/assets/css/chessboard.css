@@ -20,9 +20,9 @@
     text-decoration-style: solid;
 }
 
-/* 推演盘位于观看页右侧(推演模式窗口加宽后并排显示) */
+/* 推演盘位于观看页右侧(推演模式窗口加宽后并排显示, 左侧为对局棋谱列) */
 #practiceboard {
-    left: 672px;
+    left: 860px;
 }
 
 .piece-wrap {

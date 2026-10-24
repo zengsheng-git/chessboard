@@ -73,6 +73,7 @@ pub fn run() {
             listen::list_windows,
             worker::start_listen,
             worker::stop_listen,
+            worker::clear_game,
             config::get_engine_config,
             config::set_engine_depth,
             config::set_engine_time,

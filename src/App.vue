@@ -14,8 +14,9 @@ const mode = ref("LinkAnaly");
 const zoom = ref(Number(localStorage.getItem("xqlink_zoom")) || 1);
 
 // 按模式与缩放倍率调整 WebView 缩放和窗口尺寸, 保证内容完整显示
+// 推演模式: 观看页(镜像棋盘+分析) + 棋谱列 + 推演盘 + 推演面板 并排
 async function applyLayout(m: string, z: number) {
-    const baseWidth = m === "Practice" ? 1324 : 660;
+    const baseWidth = m === "Practice" ? 1512 : 660;
     try {
         await getCurrentWebview().setZoom(z);
         await getCurrentWindow().setSize(new LogicalSize(Math.round(baseWidth * z), Math.round(580 * z)));
@@ -43,7 +44,7 @@ onMounted(() => {
 
         <!-- 左侧: 观看页(镜像棋盘 + 分析), 推演时保持可见 -->
         <Chessboard />
-        <Practice v-show="mode === 'Practice'" />
+        <Practice v-show="mode === 'Practice'" :active="mode === 'Practice'" />
 
         <n-divider vertical class="spliter-middle" />
         <n-divider vertical class="spliter-right" v-show="mode === 'Practice'" />
@@ -82,7 +83,7 @@ onMounted(() => {
 
 .spliter-right {
     position: absolute;
-    left: 1058px;
+    left: 1246px;
     top: 100px;
     height: 425px;
     z-index: 1;

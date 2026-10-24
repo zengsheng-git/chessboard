@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { invoke } from "@tauri-apps/api/core";
 import { computed, nextTick, ref, watch } from "vue";
-import { NButton, NCard, NFlex, NTag, NText } from "naive-ui";
+import { NButton, NCard, NFlex, NTag, NText, useDialog } from "naive-ui";
 
 import { mirrorStore } from "../store";
 import { evalText, formatGap, winrateText } from "../format";
 import { computeArrows, cellRect } from "../arrows";
 import type { ArrowHint } from "../arrows";
 import "../assets/css/chessboard.css";
+
+// active: 是否处于局势推演模式(App.vue 传入); 仅在面板可见时才自动开局, 连线分析页不后台分析
+const props = defineProps<{ active: boolean }>();
+
+const dialog = useDialog();
 
 interface Position {
     piece: string;
@@ -20,8 +25,6 @@ interface PracticeState {
     moves: string[];
     history: string[];
     cursor: number;      // 当前局面位于第 cursor 步之后
-    notations: string[]; // 每步着法的中文记谱(与 history 等长)
-    start_camp: string;  // 起始局面行棋方
 }
 
 interface MoveOutcome {
@@ -50,6 +53,11 @@ const practiceStartStep = ref(-1);
 let pickedNotation: string | null = null;
 // 对局棋谱列表容器, 走子后自动滚动到最新一步
 const historyListEl = ref<HTMLElement | null>(null);
+// 会话是否未被用户探索(自动开局且未走子/未手动选点): 未探索时可自动对齐最新局面
+const sessionPristine = ref(true);
+// 当前会话游标与历史长度, 供"前进"按钮判断可否前移
+const sessionCursor = ref(0);
+const sessionHistoryLen = ref(0);
 const hint = ref({
     best: "----",
     score: 0,
@@ -99,7 +107,7 @@ const hintArrows = ref<ArrowHint[]>([]);
 const arrowShapes = computed(() => computeArrows(hintArrows.value, mirrorStore.mirror));
 
 // 棋谱条目悬停/选中时在演练盘上框出该步的起讫格(绿色方框, 起点细落点粗);
-// 悬停离开后回落到所选起点步的着法标注, 帮助看清当前局面由哪步走来
+// 悬停同时预览该步之后的局面, 移开后还原会话局面并回落到所选起点步的着法标注
 const historyMark = ref<{ from: string; to: string } | null>(null);
 const moveBoxShapes = computed(() => {
     const mark = historyMark.value;
@@ -119,10 +127,43 @@ function markOfStep(i: number): { from: string; to: string } | null {
     return { from: step.mv.substring(0, 2), to: step.mv.substring(2, 4) };
 }
 
-function hoverHistory(i: number) { historyMark.value = markOfStep(i); }
+// 是否正悬停棋谱条目预览局面: 期间会话状态变化只更新数据不刷新盘面 DOM
+let hoveringHistory = false;
 
+// 悬停棋谱条目: 演练盘预览该步之后的局面, 并框出该步起讫格, 看清这步棋怎么走的
+function hoverHistory(i: number) {
+    const step = mirrorStore.gameSteps[i];
+    if (!step) return;
+    hoveringHistory = true;
+    const map: Record<string, string> = {};
+    for (const id of ALL_IDS) map[id] = " ";
+    for (const record of step.board) map[record.pos] = record.piece;
+    renderBoard(map);
+    historyMark.value = markOfStep(i);
+}
+
+// 移开悬停: 还原为会话当前局面(未开始会话则为空盘), 标注回落到所选起点步
 function leaveHistory() {
+    hoveringHistory = false;
+    const map: Record<string, string> = {};
+    for (const id of ALL_IDS) map[id] = boardMap.value[id] ?? " ";
+    renderBoard(map);
     historyMark.value = practiceStartStep.value >= 0 ? markOfStep(practiceStartStep.value) : null;
+}
+
+// 清空对局棋谱: 后端以当前识别到的局面重建记录起点, 已记录的着法不可恢复
+function clearHistory() {
+    dialog.warning({
+        title: "清空棋谱",
+        content: "确定清空当前对局棋谱? 清空后将以当前识别到的局面重新开始记录。",
+        positiveText: "清空",
+        negativeText: "取消",
+        onPositiveClick: async () => {
+            // 先清前端列表; 监听中时后端会重建起点并整体推送, 未监听则保持空
+            mirrorStore.gameSteps = [];
+            await invoke("clear_game");
+        },
+    });
 }
 
 // 清除推荐/次优招法的提示箭头
@@ -168,18 +209,21 @@ function applyState(state: PracticeState) {
     boardMap.value = map;
     camp.value = state.camp;
     legalMoves.value = state.moves;
+    sessionCursor.value = state.cursor;
+    sessionHistoryLen.value = state.history.length;
     selected.value = "";
     moveTargets.value = [];
     clearHintHighlight();
-    renderBoard(map);
+    // 悬停棋谱预览期间只更新数据不刷新盘面, 移开后按最新数据还原
+    if (!hoveringHistory) renderBoard(map);
 }
 
 function isOwnPiece(piece: string) {
     return camp.value === "w" ? piece >= "A" && piece <= "Z" : piece >= "a" && piece <= "z";
 }
 
-// 以对局棋谱第 index 步之后的局面开局推演(index=-1 表示尚未开始)
-async function startAt(index: number) {
+// 以对局棋谱第 index 步之后的局面开局推演; auto=自动对齐(用户未手动操作时会话保持"未探索"状态)
+async function startAt(index: number, auto = false) {
     const steps = mirrorStore.gameSteps;
     if (!steps.length) {
         tip.value = "尚未识别到对局, 请先在连线分析中启动监听";
@@ -196,6 +240,7 @@ async function startAt(index: number) {
         tip.value = "";
         applyState(state);
         started.value = true;
+        sessionPristine.value = auto;
         practiceStartStep.value = at;
         pickedNotation = step.notation;
         // 在演练盘上框出所选起点步的起讫格, 看清起始局面由哪步走来
@@ -236,6 +281,8 @@ async function doMove(from: string, to: string) {
         const interrupt = thinking.value;
         const outcome = await invoke<MoveOutcome>("practice_do_move", { from, to, interrupt });
         applyState(outcome.state);
+        // 用户已手动试招, 会话不再被自动对齐
+        sessionPristine.value = false;
         // 框出刚走的这步起讫格, 与棋谱联动
         historyMark.value = { from, to };
         pendingMoves += 1;
@@ -273,11 +320,35 @@ async function resetPractice() {
     }
 }
 
+// 前进到会话历史的下一步(悔棋回退后可用, 非破坏性回到刚才的推演线)
+async function redoMove() {
+    try {
+        await applyNavigated(await invoke<PracticeState>("practice_goto", { index: sessionCursor.value + 1 }));
+    } catch (e) {
+        tip.value = String(e);
+    }
+}
+
+// 自动对齐最新局面: 仅在推演面板可见时生效(连线分析页不启动会话, 不产生后台分析);
+// 尚未开局, 或会话是自动开局且用户未探索、起点已落后时, 重开到最新局面; 用户探索过的会话不动
+let autoAligning = false;
+async function autoAlign() {
+    if (autoAligning || !props.active) return;
+    const latest = mirrorStore.gameSteps.length - 1;
+    if (latest < 0) return;
+    if (!started.value || (sessionPristine.value && practiceStartStep.value !== latest)) {
+        autoAligning = true;
+        try {
+            await startAt(latest, true);
+        } finally {
+            autoAligning = false;
+        }
+    }
+}
+
 // 对局棋谱变化时自动滚动到最新一步, 便于随时点最新局面开局;
-// 棋谱被后端整体重建(首次识别/盘面跳变)后, 原选中步骤可能已不存在, 此时复位高亮;
-// 尚未开始推演时棋谱一旦可用, 自动以最新局面开始推演(打开局势推演即记录, 无需手动点击)
-let autoStarting = false;
-watch(() => mirrorStore.gameSteps.length, async (len) => {
+// 棋谱被后端整体重建(首次识别/盘面跳变)后, 原选中步骤可能已不存在, 此时复位高亮
+watch(() => mirrorStore.gameSteps.length, async () => {
     if (practiceStartStep.value >= 0
         && mirrorStore.gameSteps[practiceStartStep.value]?.notation !== pickedNotation) {
         practiceStartStep.value = -1;
@@ -286,24 +357,21 @@ watch(() => mirrorStore.gameSteps.length, async (len) => {
     await nextTick();
     const el = historyListEl.value;
     if (el) el.scrollTop = el.scrollHeight;
-    if (!started.value && !autoStarting && len > 0) {
-        autoStarting = true;
-        try {
-            await startAt(len - 1);
-        } finally {
-            autoStarting = false;
-        }
-    }
+    await autoAlign();
 });
 
-// 棋谱条目文本: 第 0 项为起始局面, 之后为"回合. 走子方记谱 起点-落点"(如 "1. 红炮二平五 h2-e2")
+// 进入推演面板时对齐一次(未开局/自动开局已落后则重开到最新局面)
+watch(() => props.active, (active) => {
+    if (active) void autoAlign();
+});
+
+// 棋谱条目文本: 第 0 项为起始局面, 之后为"回合. 走子方+记谱"(如 "1. 红炮二平五");
+// 起讫格不进文字, 由悬停时演练盘上的绿框标注
 function stepText(index: number): string {
     if (index === 0) return "起始";
     const step = mirrorStore.gameSteps[index];
     const side = step?.mover === "b" ? "黑" : "红";
-    const mv = step?.mv ?? "";
-    const coords = mv.length >= 4 ? ` ${mv.substring(0, 2)}-${mv.substring(2, 4)}` : "";
-    return `${Math.ceil(index / 2)}. ${side}${step?.notation ?? ""}${coords}`;
+    return `${Math.ceil(index / 2)}. ${side}${step?.notation ?? ""}`;
 }
 
 // 对当前演练局面做云库优先的分析; 走子过快时旧分析的结果按序号丢弃
@@ -459,36 +527,39 @@ function previewAlt(index: number) {
             </svg>
         </div>
 
-        <n-card title="局势推演" :bordered="false" class="practice-panel">
-            <div class="history">
+        <!-- 对局棋谱: 推演盘左侧独立列, 单列展示全部着法, 点击任意一步以该步之后的局面开局 -->
+        <div class="history-panel">
+            <n-flex justify="space-between" align="center">
                 <n-text strong style="font-size: 12px">对局棋谱</n-text>
-                <div ref="historyListEl" class="history-list">
-                    <span
-                        v-for="(step, i) in mirrorStore.gameSteps"
-                        :key="i"
-                        class="history-item"
-                        :class="{
-                            'history-start': i === 0,
-                            'history-picked': practiceStartStep === i,
-                            'side-red': step.mover === 'w',
-                            'side-black': step.mover === 'b',
-                        }"
-                        :title="i === 0 ? '从起始局面开始推演' : `${stepText(i)} | 点击以这一步之后的局面开始推演`"
-                        @click="startAt(i)"
-                        @mouseenter="hoverHistory(i)"
-                        @mouseleave="leaveHistory()"
-                    >{{ stepText(i) }}</span>
-                    <n-text v-if="!mirrorStore.gameSteps.length" depth="3" style="font-size: 12px">
-                        暂无对局, 请先在连线分析中启动监听
-                    </n-text>
-                </div>
+                <n-button v-if="mirrorStore.gameSteps.length" size="tiny" quaternary @click="clearHistory">清空</n-button>
+            </n-flex>
+            <div ref="historyListEl" class="history-list">
+                <span
+                    v-for="(step, i) in mirrorStore.gameSteps"
+                    :key="i"
+                    class="history-item"
+                    :class="{
+                        'history-picked': practiceStartStep === i,
+                        'side-red': step.mover === 'w',
+                        'side-black': step.mover === 'b',
+                    }"
+                    @click="startAt(i)"
+                    @mouseenter="hoverHistory(i)"
+                    @mouseleave="leaveHistory()"
+                >{{ stepText(i) }}</span>
+                <n-text v-if="!mirrorStore.gameSteps.length" depth="3" style="font-size: 12px">
+                    暂无对局, 请先在连线分析中启动监听
+                </n-text>
             </div>
+        </div>
+
+        <n-card title="局势推演" :bordered="false" class="practice-panel">
             <div v-if="!started" class="practice-tip">
                 <n-text depth="3">识别到对局后自动以最新局面开始推演; 点击棋谱任意一步可从该步的局面重开, 自由替双方试招, 每步给出提示与代价。</n-text>
                 <n-button v-if="mirrorStore.gameSteps.length" type="primary" size="small" @click="startPractice">立即开始</n-button>
                 <n-text v-if="tip" type="error">{{ tip }}</n-text>
             </div>
-            <template v-else>
+            <div v-else class="practice-info">
                 <n-flex justify="space-between" align="end">
                     <n-text type="info" class="analyse-title" strong @mouseenter="previewLine(0)" @mouseleave="restoreBoard()">
                         {{ camp === "w" ? "红方" : "黑方" }} {{ hint.best }}
@@ -526,13 +597,16 @@ function previewAlt(index: number) {
                         <n-text depth="3">{{ i + 2 }}. {{ m }} {{ formatGap(altScores[i]) }}</n-text>
                     </div>
                 </div>
-                <n-flex :size="4" class="practice-actions">
-                    <n-button size="tiny" type="primary" @click="startPractice">重新推演</n-button>
-                    <n-button size="tiny" @click="undoMove">悔棋</n-button>
-                    <n-button size="tiny" @click="resetPractice">回起始</n-button>
-                </n-flex>
-            </template>
+            </div>
         </n-card>
+
+        <!-- 推演操作: 推演盘正下方 -->
+        <n-flex v-if="started" :size="8" justify="center" class="practice-actions">
+            <n-button size="tiny" type="primary" @click="startPractice">重新推演</n-button>
+            <n-button size="tiny" @click="undoMove">悔棋</n-button>
+            <n-button size="tiny" :disabled="sessionCursor >= sessionHistoryLen" @click="redoMove">前进</n-button>
+            <n-button size="tiny" @click="resetPractice">回起始</n-button>
+        </n-flex>
     </div>
 </template>
 
@@ -540,7 +614,7 @@ function previewAlt(index: number) {
 .practice-panel {
     width: 260px;
     height: 440px;
-    left: 1060px;
+    left: 1248px;
     top: 0px;
     position: absolute;
 }
@@ -560,24 +634,29 @@ function previewAlt(index: number) {
     margin-top: 4px;
 }
 
-/* 对局棋谱: 双列紧凑排布, 长对局纵向滚动, 点击任意一步开局推演 */
-.history {
-    margin-top: 2px;
+/* 对局棋谱: 推演盘左侧独立列, 单列展示完整棋谱, 长对局纵向滚动并自动跟随最新一步 */
+.history-panel {
+    position: absolute;
+    left: 672px;
+    top: 0px;
+    width: 180px;
+    height: 440px;
+    display: flex;
+    flex-direction: column;
 }
 
 .history-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 2px 4px;
-    max-height: 96px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    margin-top: 4px;
-    padding-right: 2px;
+    margin-top: 6px;
 }
 
 .history-item {
+    display: block;
+    margin-bottom: 2px;
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.6;
     padding: 0 5px;
     border-radius: 3px;
     cursor: pointer;
@@ -585,10 +664,6 @@ function previewAlt(index: number) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-
-.history-item.history-start {
-    grid-column: 1 / -1;
 }
 
 .history-item.side-red {
@@ -654,8 +729,13 @@ function previewAlt(index: number) {
     background-color: rgba(24, 160, 88, 0.15);
 }
 
+/* 推演操作: 推演盘正下方, 与盘同宽居中 */
 .practice-actions {
-    margin-top: 8px;
+    position: absolute;
+    left: 860px;
+    top: 528px;
+    width: 380px;
+    z-index: 20;
 }
 
 

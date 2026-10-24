@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 
@@ -23,6 +24,10 @@ use crate::yolo::predict;
 use crate::yolo::IMAGE_HEIGHT;
 use crate::yolo::IMAGE_WIDTH;
 use crate::SHARED_STATE;
+
+// 棋谱清空请求: 置位后监听线程在下一拍有效识别局面处清空记录,
+// 走 Initial 流程以当前局面重建棋谱起点(未监听时留待下次监听生效, 无副作用)
+static GAME_CLEAR_REQUEST: AtomicBool = AtomicBool::new(false);
 
 // 棋盘分析结果
 struct BoardAnalysisResult {
@@ -65,6 +70,7 @@ struct AnalysisContext {
     game: Vec<GameStep>,    // 真实对局棋谱(第 0 项为起始局面), 每步走子后追加并整体推给前端
     recorded_board: [[char; 9]; 10], // 最后一次记入棋谱的局面; 只在记谱/重建时更新, 不被跟踪抖动污染
     pending_board: Option<[[char; 9]; 10]>, // Initial 重建前的待确认局面(连续两拍一致才重建, 过滤抖动帧)
+    one_wait_count: usize, // 单格"出现"差连续拍数: 连续多拍说明记录基准缺子, 断档续记自愈
 }
 
 unsafe impl Send for AnalysisContext {}
@@ -87,6 +93,7 @@ impl AnalysisContext {
             game: Vec::new(),
             recorded_board: [[' '; 9]; 10],
             pending_board: None,
+            one_wait_count: 0,
         }
     }
 
@@ -425,6 +432,19 @@ fn process_analysis_loop(mut context: AnalysisContext) {
         let (camp, board) = board_result.unwrap();
         trace!("{:?} {:?}", camp, board);
 
+        // 清空棋谱请求: 校验当前局面有效后清空记录并走 Initial 流程,
+        // 以当前局面重建棋谱起点; 无效帧(拾子/误检)时保留请求等下一拍
+        if GAME_CLEAR_REQUEST.load(std::sync::atomic::Ordering::Relaxed)
+            && chess::board_check(board)
+        {
+            GAME_CLEAR_REQUEST.store(false, std::sync::atomic::Ordering::Relaxed);
+            info!("清空对局棋谱, 以当前局面重建记录起点");
+            context.game.clear();
+            context.pending_board = None;
+            context.one_wait_count = 0;
+            current_state = ChessboardState::Initial;
+        }
+
         // 根据不同状态处理棋盘
         current_state = match current_state {
             ChessboardState::Initial => {
@@ -433,86 +453,104 @@ fn process_analysis_loop(mut context: AnalysisContext) {
                     debug!("识别局面无效, 等待识别稳定");
                     ChessboardState::Invalid
                 } else {
-                // 中途恢复跟踪(拾子帧/漏拍/抖动后回到 Initial): 以棋谱基准衔接, 而非直接重置
-                let mut recovered: Option<ChessboardState> = None;
-                if !context.game.is_empty() {
-                    if board == context.recorded_board {
-                        // 抖动幻影消失后盘面与记谱基准一致: 回退跟踪, 不做无谓重分析
-                        context.pending_board = None;
-                        context.last_board = board;
-                        recovered = Some(ChessboardState::OurTurn);
-                    } else {
-                        let (changed, diff_state) = chess::board_diff(context.recorded_board, board);
-                        match diff_state {
-                            // 恰好比记谱基准多一步(拾子帧 One→Invalid→Initial 后走子完成): 补记衔接
-                            chess::BoardChangeState::Move => {
-                                info!("跟踪恢复: 与棋谱基准衔接一步");
-                                context.pending_board = None;
-                                context.record_game_step(&changed, board);
-                                recovered = Some(context.advance(&changed, board, &camp));
-                            }
-                            // 仍只差一格(拾子帧/瞬时误检): 基准回退到记谱局面, 等走子完成
-                            chess::BoardChangeState::One => {
-                                debug!("跟踪恢复: 单格变化, 等待走子完成");
-                                context.pending_board = None;
-                                context.last_board = context.recorded_board;
-                                recovered = Some(ChessboardState::OurTurn);
-                            }
-                            // 多格变化: 先尝试桥接补记(捕获间隔内连走多步), 无法桥接才走稳定确认
-                            _ => {
-                                if let Some(next) = context.try_bridge(board, &camp) {
+                    // 中途恢复跟踪(拾子帧/漏拍/抖动后回到 Initial): 以棋谱基准衔接, 而非直接重置
+                    let mut recovered: Option<ChessboardState> = None;
+                    if !context.game.is_empty() {
+                        if board == context.recorded_board {
+                            // 抖动幻影消失后盘面与记谱基准一致: 回退跟踪, 不做无谓重分析
+                            context.pending_board = None;
+                            context.last_board = board;
+                            context.one_wait_count = 0;
+                            // 进入 Initial 前的跟踪状态已丢失, OurTurn/OpponentTurn 在主循环
+                            // 同一分支处理, 统一回 OurTurn 无行为差异
+                            recovered = Some(ChessboardState::OurTurn);
+                        } else {
+                            let (changed, diff_state) = chess::board_diff(context.recorded_board, board);
+                            match diff_state {
+                                // 恰好比记谱基准多一步(拾子帧 One→Invalid→Initial 后走子完成): 补记衔接
+                                chess::BoardChangeState::Move => {
+                                    info!("跟踪恢复: 与棋谱基准衔接一步");
                                     context.pending_board = None;
-                                    recovered = Some(next);
-                                } else if context.pending_board == Some(board) {
+                                    context.one_wait_count = 0;
+                                    context.record_game_step(&changed, board);
+                                    recovered = Some(context.advance(&changed, board, &camp));
+                                }
+                                // 仍只差一格: 基准回退到记谱局面, 等待走子完成。
+                                // 拿起棋子(仅起点空)是思考中间态, 持续等待即可;
+                                // 单格出现(落子完成但基准缺子)说明基准可能已被拾子帧污染,
+                                // 连续多拍未解决则断档续记同步基准, 避免跟踪卡死
+                                chess::BoardChangeState::One => {
+                                    debug!("跟踪恢复: 单格变化, 等待走子完成");
                                     context.pending_board = None;
-                                    info!("局面跳变已稳定, 以当前局面重建基准(断档续记)");
-                                } else {
-                                    context.pending_board = Some(board);
-                                    debug!("局面跳变待稳定, 暂缓重建");
-                                    recovered = Some(ChessboardState::Initial);
+                                    context.last_board = context.recorded_board;
+                                    if !changed.from.is_empty() && changed.to.is_empty() {
+                                        context.one_wait_count = 0;
+                                    } else {
+                                        context.one_wait_count += 1;
+                                        if context.one_wait_count >= 3 {
+                                            context.one_wait_count = 0;
+                                            info!("单格出现连续多拍未解决, 判定记录基准缺子, 断档续记");
+                                            context.recorded_board = board;
+                                            context.last_board = board;
+                                        }
+                                    }
+                                    recovered = Some(ChessboardState::OurTurn);
+                                }
+                                // 多格变化: 先尝试桥接补记(捕获间隔内连走多步), 无法桥接才走稳定确认
+                                _ => {
+                                    if let Some(next) = context.try_bridge(board, &camp) {
+                                        context.pending_board = None;
+                                        recovered = Some(next);
+                                    } else if context.pending_board == Some(board) {
+                                        context.pending_board = None;
+                                        info!("局面跳变已稳定, 以当前局面重建基准(断档续记)");
+                                    } else {
+                                        context.pending_board = Some(board);
+                                        debug!("局面跳变待稳定, 暂缓重建");
+                                        recovered = Some(ChessboardState::Initial);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if let Some(next) = recovered {
-                    next
-                } else {
-                    // 初始状态，做第一次分析
-                    debug!("首次启动，立即分析");
-
-                    // 设置前端棋盘
-                    context.update_ui(&camp, board);
-
-                    // 确定初始局面轮到谁：初始棋盘红方先手，否则按玩家阵营近似
-                    let turn = if chess::startpos(board) {
-                        chess::Camp::Red
-                    } else if camp.eq(&chess::Camp::Red) {
-                        chess::Camp::Red
+                    if let Some(next) = recovered {
+                        next
                     } else {
-                        chess::Camp::Black
-                    };
+                        // 初始状态，做第一次分析
+                        debug!("首次启动，立即分析");
 
-                    // 重建对局棋谱(仅首次识别或新对局时清空; 对局中恢复保留已有棋谱)
-                    context.reset_game(&turn, board);
+                        // 设置前端棋盘
+                        context.update_ui(&camp, board);
 
-                    // 分析当前行棋方
-                    if let Some(result) = context.analyze_board(&turn, board) {
-                        context.expect_move = result.expect_move;
-                        context.expect_board = result.expect_board;
+                        // 确定初始局面轮到谁：初始棋盘红方先手，否则按玩家阵营近似
+                        let turn = if chess::startpos(board) {
+                            chess::Camp::Red
+                        } else if camp.eq(&chess::Camp::Red) {
+                            chess::Camp::Red
+                        } else {
+                            chess::Camp::Black
+                        };
+
+                        // 重建对局棋谱(仅首次识别或新对局时清空; 对局中恢复保留已有棋谱)
+                        context.reset_game(&turn, board);
+
+                        // 分析当前行棋方
+                        if let Some(result) = context.analyze_board(&turn, board) {
+                            context.expect_move = result.expect_move;
+                            context.expect_board = result.expect_board;
+                        }
+
+                        context.last_board = board;
+
+                        // 如果是初始棋盘，进入初始状态，否则进入一般状态
+                        if chess::startpos(board) {
+                            ChessboardState::StartPos
+                        } else if turn.eq(&camp) {
+                            ChessboardState::OurTurn
+                        } else {
+                            ChessboardState::OpponentTurn
+                        }
                     }
-
-                    context.last_board = board;
-
-                    // 如果是初始棋盘，进入初始状态，否则进入一般状态
-                    if chess::startpos(board) {
-                        ChessboardState::StartPos
-                    } else if turn.eq(&camp) {
-                        ChessboardState::OurTurn
-                    } else {
-                        ChessboardState::OpponentTurn
-                    }
-                }
                 }
             }
 
@@ -728,6 +766,12 @@ pub fn stop_listen() {
         });
     }
     debug!("stoped");
+}
+
+// 请求清空对局棋谱: 由监听线程在下一拍有效局面处以当前局面重建记录起点
+#[tauri::command]
+pub fn clear_game() {
+    GAME_CLEAR_REQUEST.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
